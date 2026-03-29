@@ -28,13 +28,11 @@ class SessionRunner:
         self,
         env: TauBenchEnv,
         model: str,
-        provider: str,
         max_turns: int = 15,
         seed: int = 42,
     ):
         self.env = env
         self.model = model
-        self.provider = provider
         self.max_turns = max_turns
         self.seed = seed
 

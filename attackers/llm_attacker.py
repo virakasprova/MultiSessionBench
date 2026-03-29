@@ -33,14 +33,12 @@ class LLMAttacker(AttackerAgent):
     def __init__(
         self,
         model: str,
-        provider: str,
         system_prompt: str | None = None,
         temperature: float = 0.4,
         max_tokens: int = 1024,
         seed: int | None = None,
     ):
         self.model = model
-        self.provider = provider
         self.system_prompt = system_prompt if system_prompt is not None else DEFAULT_ATTACKER_SYSTEM
         self.temperature = temperature
         self.max_tokens = max_tokens
