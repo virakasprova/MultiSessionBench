@@ -6,4 +6,5 @@ tenacity>=8.3.0
 termcolor>=2.4.0
 numpy>=1.26.4
 litellm>=1.41.0
+pyyaml>=6.0
 tau-bench @ git+https://github.com/sierra-research/tau-bench.git
