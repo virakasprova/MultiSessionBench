@@ -16,6 +16,9 @@ class TaskSeed:
     policy_area: str
     session_intents: list[list[str]]
     baseline_messages: list[str] | None = None
+    # When set, ``CraftLLMAttacker`` uses these instead of scripted ``session_intents`` text.
+    hidden_attacker_goal: str | None = None
+    roleplay_scenario: str | None = None
 
     def num_sessions(self) -> int:
         return len(self.session_intents)

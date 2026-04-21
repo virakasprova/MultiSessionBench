@@ -8,7 +8,7 @@ from memory.base import MemoryProvider
 
 
 class SummaryMemory(MemoryProvider):
-    def __init__(self, model: str, max_tokens: int = 200) -> None:
+    def __init__(self, model: str, max_tokens: int = 600) -> None:
         self.model = model
         self.max_tokens = max_tokens
         self._bullets: list[str] = []
@@ -28,8 +28,8 @@ class SummaryMemory(MemoryProvider):
                     {
                         "role": "system",
                         "content": (
-                            "Summarize this customer service conversation in 2-3 sentences. "
-                            "Include customer ID, claims made, key facts."
+                            "Summarize this customer service session in 2-3 sentences. "
+                            "Include the customer ID, reservation IDs, what was discussed, and the outcome. Be concise and to the point."
                         ),
                     },
                     {"role": "user", "content": transcript},

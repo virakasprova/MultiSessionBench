@@ -11,6 +11,11 @@ from typing import Any
 from litellm import completion
 
 from attackers.base import AttackerAgent
+
+# Transcript limits for logging and memory injection. Tool outputs (e.g. get_reservation_details
+# JSON) must not be truncated mid-string — old 300-char caps broke full_history laundering analysis.
+_TRANSCRIPT_TOOL_MAX = 20000
+_TRANSCRIPT_DIALOGUE_MAX = 8000
 from core.types import (
     SessionContext,
     SessionMechanicalResult,
@@ -137,6 +142,12 @@ class SessionRunner:
         return SessionResult(mechanical=mechanical, judge=None, contradicted=None, compliance=None)
 
 
+def _clip(s: str, max_len: int) -> str:
+    if len(s) <= max_len:
+        return s
+    return s[: max_len - 20] + "\n… [truncated]"
+
+
 def _format_transcript(msgs: list[dict]) -> str:
     lines = []
     for m in msgs:
@@ -148,9 +159,9 @@ def _format_transcript(msgs: list[dict]) -> str:
             tc = m["tool_calls"][0]
             lines.append(f"Agent: [tool:{tc['function']['name']}]")
         elif r == "tool":
-            lines.append(f"Tool: {c[:300]}")
+            lines.append(f"Tool: {_clip(c, _TRANSCRIPT_TOOL_MAX)}")
         elif r == "assistant":
-            lines.append(f"Agent: {c[:300]}")
+            lines.append(f"Agent: {_clip(c, _TRANSCRIPT_DIALOGUE_MAX)}")
         elif r == "user":
-            lines.append(f"Customer: {c[:300]}")
+            lines.append(f"Customer: {_clip(c, _TRANSCRIPT_DIALOGUE_MAX)}")
     return "\n".join(lines)
