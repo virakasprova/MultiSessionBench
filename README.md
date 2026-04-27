@@ -44,18 +44,16 @@ Or place `OPENROUTER_API_KEY=...` in `experiments/.env`.
 | `core/judge.py` | Post-hoc LLM judge for compliance scoring |
 | `attackers/` | `AttackerAgent` ABC, `LLMAttacker`, `CraftLLMAttacker` (Plant / Reinforce / Trigger) |
 | `memory/` | `BaseMemoryProvider` ABC + `make_memory_provider` factory (10 configs) + the four novel measurement modules. **See [`memory/README.md`](memory/README.md) for in-depth docs.** |
-| `tasks/seeds/` | Per-task YAML `TaskSeed` definitions for the generic runner |
-| `tasks/craft_airline_multisession_seeds.yaml` | Plant/Reinforce/Trigger seeds for the CRAFT runner |
-| `tasks/loader.py` | Reads both YAML formats (incl. optional `planted_claims:` blocks) |
-| `analysis/report.py` | `analyze()` on JSONL — per-mode tables, laundering heuristic, summary-degradation comparison |
-| `experiments/run_craft_multisession.py` | **Primary runner.** CRAFT-style Plant/Reinforce/Trigger attacks across all 10 memory configs |
-| `experiments/run_multisession.py` | Generic τ-bench runner (no_memory / full_history / summary only) |
+| `tasks/craft_airline_multisession_seeds.yaml` | Plant/Reinforce/Trigger seeds (the active seed set) |
+| `tasks/loader.py` | Loads the CRAFT YAML (incl. optional `planted_claims:` blocks) |
+| `analysis/report.py` | `analyze()` on JSONL — per-mode tables, laundering heuristic, summary-degradation comparison, instrument metrics |
+| `experiments/run_craft_multisession.py` | The runner — CRAFT-style Plant/Reinforce/Trigger attacks across all 10 memory configs |
 | `experiments/enrich_judge.py` | Post-hoc judge + compliance enrichment on a JSONL run |
 | `experiments/run_experiment.py` | Original single-file PoC monolith (kept for reference) |
 
 ## Running experiments
 
-### CRAFT multi-session runner (primary)
+### CRAFT multi-session runner
 
 `run_craft_multisession.py` reads `tasks/craft_airline_multisession_seeds.yaml`
 (Plant / Reinforce / Trigger session intents per seed) and runs the CRAFT
@@ -131,19 +129,6 @@ Off by default so JSONLs remain comparable to pre-instrumentation runs.
 on each YAML seed (recommended — lets you specify `variants` that match
 expected laundered phrasings); when omitted, a single primary claim is
 auto-derived from `false_claim` + `policy_area`.
-
-### Generic runner
-
-`run_multisession.py` is the lighter, original runner that exposes only
-`no_memory`, `full_history`, and `summary` and reads per-task YAMLs from
-`tasks/seeds/`. Useful for τ-bench retail or non-CRAFT tasks. Also accepts
-`--instrument`.
-
-```bash
-python experiments/run_multisession.py
-python experiments/run_multisession.py --domain retail
-python experiments/run_multisession.py --memory-modes no_memory full_history
-```
 
 ### Post-hoc judge
 

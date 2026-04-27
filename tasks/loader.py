@@ -1,10 +1,8 @@
 """YAML seed loader.
 
-Each .yaml file in tasks/seeds/ defines one attack scenario (TaskSeed).
-Requires ``session_intents`` in YAML (see ``tasks/seeds/*.yaml``).
-
-``craft_airline_multisession_seeds.yaml`` uses a top-level ``seeds:`` list and may use a *flat*
-``session_intents`` (one string per session); use ``load_craft_multisession_yaml``.
+The active path is ``tasks/craft_airline_multisession_seeds.yaml`` — a
+top-level ``seeds:`` list whose entries have flat ``session_intents`` (one
+string per session). Use ``load_craft_multisession_yaml`` to read it.
 """
 from __future__ import annotations
 
@@ -13,24 +11,6 @@ from pathlib import Path
 import yaml
 
 from core.types import TaskSeed
-
-SEEDS_DIR = Path(__file__).resolve().parent / "seeds"
-
-
-def load_seed(path: Path) -> TaskSeed:
-    with open(path) as f:
-        d = yaml.safe_load(f)
-    # Accept the user-facing key ``planted_claims:`` as a synonym for the
-    # internal field name ``planted_claim_data``. Keeps the YAML schema
-    # consistent with ``load_craft_multisession_yaml``.
-    if "planted_claims" in d and "planted_claim_data" not in d:
-        d["planted_claim_data"] = d.pop("planted_claims")
-    return TaskSeed(**d)
-
-
-def load_seeds(directory: Path | None = None) -> list[TaskSeed]:
-    d = directory or SEEDS_DIR
-    return [load_seed(p) for p in sorted(d.glob("*.yaml"))]
 
 
 def _normalize_craft_seed_entry(raw: dict) -> dict:

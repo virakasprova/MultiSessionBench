@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Post-hoc LLM judge: read experiment JSONL, add per-session judge + compliance, write JSONL.
 
-Mechanical runs (e.g. ``run_multisession.py``) omit judge fields; run this before ``analyze`` when
+Mechanical runs (``run_craft_multisession.py``) omit judge fields; run this before ``analyze`` when
 you need compliance, persistence (accepted), or contradiction metrics.
 """
 from __future__ import annotations

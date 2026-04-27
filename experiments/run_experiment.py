@@ -5,7 +5,7 @@ Usage:
     export OPENROUTER_API_KEY=sk-or-...
     python experiments/run_experiment.py              # real run
     python experiments/run_experiment.py --mock       # simulated (no API key)
-    python experiments/run_experiment.py --analyze <jsonl>  # modular run_multisession / enrich_judge shape only
+    python experiments/run_experiment.py --analyze <jsonl>  # modular run_craft_multisession / enrich_judge shape only
 """
 import argparse, json, os, random, sys, time
 from dataclasses import dataclass, asdict
