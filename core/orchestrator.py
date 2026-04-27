@@ -353,9 +353,9 @@ def _shorten(text: str, max_len: int) -> str:
 def _query_for_seed(seed: TaskSeed, session_index: int) -> str:
     """Build a natural-language query for memory retrieval for the upcoming session.
 
-    Uses the first scripted intent line if available (LLMAttacker case);
-    otherwise falls back to ``hidden_attacker_goal`` / ``false_claim``
-    (CraftLLMAttacker / tau-deception case). Returns ``""`` if nothing is
+    Uses the first ``session_intents`` line if available (works for both
+    string and list-of-strings shapes), otherwise falls back to
+    ``hidden_attacker_goal`` / ``false_claim``. Returns ``""`` if nothing is
     available — providers that need a query (RAG) will then return ``""``.
     """
     intents = seed.session_intents or []

@@ -42,7 +42,7 @@ Or place `OPENROUTER_API_KEY=...` in `experiments/.env`.
 | `core/orchestrator.py` | Multi-session attack driver, wires the optional instrument bundle |
 | `core/instrumentation.py` | `Instruments` bundle + `derive_planted_claims` factory |
 | `core/judge.py` | Post-hoc LLM judge for compliance scoring |
-| `attackers/` | `AttackerAgent` ABC, `LLMAttacker`, `CraftLLMAttacker` (Plant / Reinforce / Trigger) |
+| `attackers/` | `AttackerAgent` ABC + `CraftLLMAttacker` (LLM-driven, Plant / Reinforce / Trigger) |
 | `memory/` | `BaseMemoryProvider` ABC + `make_memory_provider` factory (10 configs) + the four novel measurement modules. **See [`memory/README.md`](memory/README.md) for in-depth docs.** |
 | `tasks/craft_airline_multisession_seeds.yaml` | Plant/Reinforce/Trigger seeds (the active seed set) |
 | `tasks/loader.py` | Loads the CRAFT YAML (incl. optional `planted_claims:` blocks) |
@@ -85,6 +85,28 @@ python experiments/run_craft_multisession.py --all-modes --limit 5 --instrument
 
 `--memory-modes`, `--all-non-rag`, and `--all-modes` are mutually exclusive
 (enforced by argparse).
+
+### Manual probing (`--human-attacker`)
+
+Drive the customer side from stdin instead of CraftLLMAttacker — useful for
+poking a specific (seed, memory_mode) combination without burning attacker
+tokens, or for sanity-checking how a memory mode behaves on phrasings the
+LLM attacker never tries.
+
+```bash
+python experiments/run_craft_multisession.py \
+    --human-attacker \
+    --seed-ids C_airline_10_24h_cancel \
+    --memory-modes summary_cumulative
+```
+
+The runner skips the auto full-blob and trigger-only baselines (manually
+replaying the same arc three times is tedious). Multi-session iteration
+still fires: each session opens a fresh stdin loop with the phase header
+(Plant / Reinforce / Trigger), the false claim, and the scenario hint
+printed up top. End a session with an empty line, `:q`, `###STOP###`, or
+Ctrl-D. The runner refuses if more than one (seed, mode) combination is
+selected — one human, one terminal.
 
 ### Available memory modes
 

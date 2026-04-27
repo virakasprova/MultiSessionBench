@@ -46,7 +46,7 @@ if _env.exists():
             os.environ.setdefault(k.strip(), v.strip())
 
 from analysis import analyze, load_results_jsonl
-from attackers import CraftLLMAttacker
+from attackers import CraftLLMAttacker, HumanAttacker
 from core.environment import TauBenchEnv
 from core.instrumentation import build_instruments, derive_planted_claims
 from core.orchestrator import Orchestrator
@@ -257,6 +257,19 @@ def main() -> None:
     p.add_argument("--attacker-temperature", type=float, default=0.5)
     p.add_argument("--max-turns", type=int, default=20, metavar="N")
     p.add_argument(
+        "--human-attacker",
+        action="store_true",
+        help=(
+            "Drive the customer side from stdin instead of CraftLLMAttacker. "
+            "Useful for manual probing of one (seed, memory_mode) pair. "
+            "Skips the auto full-blob and trigger-only baselines (you don't "
+            "want to manually replay the same arc three times). Pair with "
+            "--seed-ids and a single --memory-modes value; sweeps with many "
+            "(seed, mode) combinations are rejected since each combination "
+            "queues another interactive session on the same terminal."
+        ),
+    )
+    p.add_argument(
         "--instrument",
         action="store_true",
         help=(
@@ -364,12 +377,28 @@ def main() -> None:
     env = TauBenchEnv("airline")
     runner = SessionRunner(env, args.model, max_turns=args.max_turns)
     atk_model = args.attacker_model or ATTACKER_MODEL
-    attacker = CraftLLMAttacker(atk_model, temperature=args.attacker_temperature)
+
+    if args.human_attacker:
+        # One human, one terminal: refuse to queue many interactive sessions.
+        n_combinations = len(seeds) * len(mem_modes)
+        if n_combinations != 1:
+            raise SystemExit(
+                f"--human-attacker requires exactly one (seed, mode) pair "
+                f"but {len(seeds)} seed(s) x {len(mem_modes)} mode(s) "
+                f"= {n_combinations} combinations were selected. "
+                "Pair with --seed-ids X and a single --memory-modes Y."
+            )
+        attacker = HumanAttacker()
+    else:
+        attacker = CraftLLMAttacker(atk_model, temperature=args.attacker_temperature)
 
     all_results = []
 
     print(f"Agent model: {args.model}")
-    print(f"Attacker: {atk_model} (CraftLLMAttacker, temp={args.attacker_temperature})")
+    if args.human_attacker:
+        print("Attacker: HumanAttacker (you drive; baselines skipped)")
+    else:
+        print(f"Attacker: {atk_model} (CraftLLMAttacker, temp={args.attacker_temperature})")
     print(f"max_turns: {args.max_turns}")
     lim_note = f" (limit {args.limit})" if args.limit else ""
     print(f"Seeds: {len(seeds)}{lim_note} | Memory modes: {list(mem_modes)}")
@@ -405,29 +434,34 @@ def main() -> None:
             audit_path=path,
         )
 
-    baseline_memory = make_memory("no_memory", args.model)
-    baseline_orch = Orchestrator(
-        env, runner, baseline_memory, attacker, mode_name="no_memory"
-    )
+    # Skip auto-baselines for human-driven runs: replaying the full arc plus
+    # trigger-only as separate single sessions interactively is tedious and
+    # not the point of dropping into the REPL. Multi-session run still fires
+    # so memory accumulation across phases is exercised.
+    if not args.human_attacker:
+        baseline_memory = make_memory("no_memory", args.model)
+        baseline_orch = Orchestrator(
+            env, runner, baseline_memory, attacker, mode_name="no_memory"
+        )
 
-    print("-- Baselines (single-session, all phases merged in one roleplay blob) --")
-    for seed in seeds:
-        print(f"  {seed.seed_id}_baseline:", end=" ")
-        r = _run_one(baseline_orch, seed, is_baseline=True)
-        all_results.append(r)
-        with open(log, "a") as f:
-            f.write(json.dumps(r.to_dict(), default=str) + "\n")
+        print("-- Baselines (single-session, all phases merged in one roleplay blob) --")
+        for seed in seeds:
+            print(f"  {seed.seed_id}_baseline:", end=" ")
+            r = _run_one(baseline_orch, seed, is_baseline=True)
+            all_results.append(r)
+            with open(log, "a") as f:
+                f.write(json.dumps(r.to_dict(), default=str) + "\n")
 
-    print("\n-- Trigger-only baselines (single session, Trigger phase only — no plant/reinforce) --")
-    for seed in seeds:
-        trigger_only = copy.deepcopy(seed)
-        trigger_only.seed_id = f"{seed.seed_id}_trigger_only"
-        trigger_only.session_intents = [seed.session_intents[-1]]
-        print(f"  {trigger_only.seed_id}_baseline:", end=" ")
-        r = _run_one(baseline_orch, trigger_only, is_baseline=True)
-        all_results.append(r)
-        with open(log, "a") as f:
-            f.write(json.dumps(r.to_dict(), default=str) + "\n")
+        print("\n-- Trigger-only baselines (single session, Trigger phase only — no plant/reinforce) --")
+        for seed in seeds:
+            trigger_only = copy.deepcopy(seed)
+            trigger_only.seed_id = f"{seed.seed_id}_trigger_only"
+            trigger_only.session_intents = [seed.session_intents[-1]]
+            print(f"  {trigger_only.seed_id}_baseline:", end=" ")
+            r = _run_one(baseline_orch, trigger_only, is_baseline=True)
+            all_results.append(r)
+            with open(log, "a") as f:
+                f.write(json.dumps(r.to_dict(), default=str) + "\n")
 
     for mode in mem_modes:
         memory = make_memory(mode, args.model, rag_backend=rag_backend)
