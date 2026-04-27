@@ -40,8 +40,8 @@ not (just) in the model's in-context reasoning.
 
 Usage
 -----
-    from memory2.confidence_drift import ConfidenceDriftTracker
-    from memory2.claim_tracker import PlantedClaim
+    from memory.confidence_drift import ConfidenceDriftTracker
+    from memory.claim_tracker import PlantedClaim
 
     claims = [PlantedClaim(claim_id="c1", canonical="I am a Gold member")]
     tracker = ConfidenceDriftTracker(claims)
@@ -63,7 +63,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Optional
 
-from memory2.claim_tracker import PlantedClaim, _normalise, _QUALIFIER_RE
+from memory.claim_tracker import PlantedClaim, _normalise, _QUALIFIER_RE
 
 
 # ---------------------------------------------------------------------------
@@ -189,11 +189,9 @@ class ConfidenceDriftTracker:
                         break
 
             count = len(matching_sentences)
-            # Claim density: tokens in matching sentences / total context tokens
             matched_tokens = sum(len(_normalise(s)) for s in matching_sentences)
             density = matched_tokens / total_tokens
 
-            # Qualifier fraction
             if count == 0:
                 qual_frac = 1.0   # vacuously true (no claim = no laundering)
             else:

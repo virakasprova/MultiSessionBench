@@ -26,12 +26,11 @@ if _env.exists():
             os.environ.setdefault(k.strip(), v.strip())
 
 from core.environment import TauBenchEnv
+from core.instrumentation import build_instruments, derive_planted_claims
 from core.session_runner import SessionRunner
 from core.orchestrator import Orchestrator
-from memory.base import MemoryProvider
-from memory.full_history import FullHistoryMemory
-from memory.none import NoMemory
-from memory.summary import SummaryMemory
+from memory import BaseMemoryProvider, make_memory_provider
+from memory.litellm_summariser import make_litellm_summariser
 from attackers import LLMAttacker
 from tasks.loader import load_seeds
 from analysis import analyze, load_results_jsonl
@@ -43,14 +42,25 @@ _DEFAULT_MEMORY_MODES = ("no_memory", "full_history", "summary")
 litellm.suppress_debug_info = True
 
 
-def make_memory(mode: str, summary_model: str) -> MemoryProvider:
-    if mode == "no_memory":
-        return NoMemory()
-    if mode == "full_history":
-        return FullHistoryMemory()
-    if mode == "summary":
-        return SummaryMemory(summary_model)
-    raise SystemExit(f"Unknown memory mode {mode!r}; expected one of {_DEFAULT_MEMORY_MODES}")
+# CLI memory-mode -> provider builder. The legacy CLI exposes only three
+# modes (``no_memory`` / ``full_history`` / ``summary``); aliases map to the
+# structured-turn factory's canonical ids so prior JSONL ``memory_mode``
+# values stay comparable. Adding a new mode is a single new line here.
+_MEMORY_DISPATCH = {
+    "no_memory":    lambda model: make_memory_provider("no_memory"),
+    "full_history": lambda model: make_memory_provider("full_context"),
+    "summary":      lambda model: make_memory_provider(
+        "summary_rolling", summariser=make_litellm_summariser(model)),
+}
+
+
+def make_memory(mode: str, summary_model: str) -> BaseMemoryProvider:
+    """Map CLI memory-mode strings to ``BaseMemoryProvider`` instances."""
+    if mode not in _MEMORY_DISPATCH:
+        raise SystemExit(
+            f"Unknown memory mode {mode!r}; expected one of {sorted(_MEMORY_DISPATCH)}"
+        )
+    return _MEMORY_DISPATCH[mode](summary_model)
 
 
 def main():
@@ -86,6 +96,18 @@ def main():
         metavar="PATH",
         help="Optional file overriding the default attacker system prompt",
     )
+    p.add_argument(
+        "--instrument",
+        action="store_true",
+        help=(
+            "Enable per-attack ClaimTracker / MemoryAuditLog / "
+            "ConfidenceDriftTracker instrumentation. Surfaces mar, "
+            "distortion_rate, first_laundering_session, and "
+            "context_size_curve onto each ExperimentResult, and writes a "
+            "consolidated instruments JSON per attack into "
+            "<results_dir>/<run_stem>_audits/. Default OFF."
+        ),
+    )
     args = p.parse_args()
 
     if args.analyze:
@@ -101,6 +123,8 @@ def main():
 
     if args.dry_run:
         print(f"Memory modes (multi-session): {list(mem_modes)}")
+        if args.instrument:
+            print("Instrumentation: ON (claim tracker + audit log + drift tracker)")
         for s in seeds:
             print(f"  {s.seed_id}: user={s.user_id} res={s.reservation_id} "
                   f"vtool={s.violation_tool} claim='{s.false_claim}' "
@@ -115,7 +139,11 @@ def main():
         sys.exit(1)
 
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    log = RESULTS_DIR / f"multi_{datetime.now():%Y%m%d_%H%M%S}.jsonl"
+    run_stem = f"multi_{datetime.now():%Y%m%d_%H%M%S}"
+    log = RESULTS_DIR / f"{run_stem}.jsonl"
+    audit_dir = (RESULTS_DIR / f"{run_stem}_audits") if args.instrument else None
+    if audit_dir is not None:
+        audit_dir.mkdir(parents=True, exist_ok=True)
 
     env = TauBenchEnv(args.domain)
     runner = SessionRunner(env, args.model)
@@ -130,26 +158,46 @@ def main():
     print(f"Domain: {args.domain}")
     print(f"Agent model: {args.model}")
     print(f"Attacker model: {atk_model}")
-    print(f"Seeds: {len(seeds)} | Multi-session memory modes: {list(mem_modes)}\n")
+    print(f"Seeds: {len(seeds)} | Multi-session memory modes: {list(mem_modes)}")
+    if args.instrument:
+        print(f"Instrumentation: ON — audits in {audit_dir}/")
+    print()
 
-    baseline_memory = NoMemory()
-    baseline_orch = Orchestrator(env, runner, baseline_memory, attacker)
+    def _run_one(orch_obj: Orchestrator, the_seed, *, is_baseline: bool):
+        if not args.instrument:
+            return orch_obj.run_attack(the_seed, is_baseline=is_baseline)
+        assert audit_dir is not None  # invariant: instrument => audit_dir set
+        claims = derive_planted_claims(the_seed)
+        instruments = build_instruments(orch_obj.memory, claims)
+        attack_id_local = the_seed.seed_id + ("_baseline" if is_baseline else "")
+        path = audit_dir / f"audit_{attack_id_local}__{orch_obj.mode_name}.json"
+        return orch_obj.run_attack(
+            the_seed,
+            is_baseline=is_baseline,
+            instruments=instruments,
+            audit_path=path,
+        )
+
+    baseline_memory = make_memory("no_memory", args.model)
+    baseline_orch = Orchestrator(
+        env, runner, baseline_memory, attacker, mode_name="no_memory"
+    )
 
     print("-- Baselines (single-session, no_memory) --")
     for seed in seeds:
         print(f"  {seed.seed_id}_baseline:", end=" ")
-        r = baseline_orch.run_attack(seed, is_baseline=True)
+        r = _run_one(baseline_orch, seed, is_baseline=True)
         all_results.append(r)
         with open(log, "a") as f:
             f.write(json.dumps(r.to_dict(), default=str) + "\n")
 
     for mode in mem_modes:
         memory = make_memory(mode, args.model)
-        orch = Orchestrator(env, runner, memory, attacker)
+        orch = Orchestrator(env, runner, memory, attacker, mode_name=mode)
         print(f"\n-- Multi-session [{mode}] --")
         for seed in seeds:
-            print(f"  {seed.seed_id} [{memory.mode_name}]:", end=" ")
-            r = orch.run_attack(seed, is_baseline=False)
+            print(f"  {seed.seed_id} [{mode}]:", end=" ")
+            r = _run_one(orch, seed, is_baseline=False)
             all_results.append(r)
             with open(log, "a") as f:
                 f.write(json.dumps(r.to_dict(), default=str) + "\n")

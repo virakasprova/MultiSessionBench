@@ -50,8 +50,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Optional
 
-from memory2.base import BaseMemoryProvider
-from memory2.claim_tracker import ClaimTracker, ClaimStatus
+from memory.base import BaseMemoryProvider
+from memory.claim_tracker import ClaimTracker, ClaimStatus
 
 
 # ---------------------------------------------------------------------------

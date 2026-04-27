@@ -43,7 +43,7 @@ claim phrasings is a new empirical finding.
 
 Usage
 -----
-    from memory2.claim_tracker import ClaimTracker, PlantedClaim
+    from memory.claim_tracker import ClaimTracker, PlantedClaim
     from memory import make_memory_provider
 
     claims = [
@@ -73,7 +73,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, Literal, Optional
 
-from memory2.base import BaseMemoryProvider, Session, Turn
+from memory.base import BaseMemoryProvider, Session, Turn
 
 
 # ---------------------------------------------------------------------------
@@ -174,7 +174,6 @@ class ClaimSurvivalReport:
         """ASCII table for quick inspection."""
         claim_ids = sorted({r.claim_id for r in self.results})
         session_indices = sorted({r.session_index for r in self.results})
-        # header
         col_w = 12
         header = f"{'claim_id':<16}" + "".join(f"S{i:<{col_w-1}}" for i in session_indices)
         rows = [header, "-" * len(header)]
@@ -204,9 +203,6 @@ _QUALIFIER_RE = re.compile(
     "|".join(_QUALIFIER_PATTERNS), re.IGNORECASE
 )
 
-# How similar does matched text need to be to count as PRESENT vs DISTORTED?
-# We use simple normalised overlap rather than embeddings to keep this
-# dependency-free and reproducible.
 
 def _normalise(text: str) -> set[str]:
     """Lowercase word tokens, strip punctuation."""
@@ -288,15 +284,12 @@ class ClaimTracker:
     ) -> str:
         session_id = session_id or str(uuid.uuid4())
 
-        # Tag turns that contain planted claims
         self._tag_turns(turns, session_id)
 
-        # Ingest into underlying provider
         self.provider.add_session(
             turns, session_id=session_id, user_type=user_type, user_id=user_id
         )
 
-        # Inspect memory state and record claim statuses
         memory_text = self.provider.snapshot()
         for claim in self.claims.values():
             result = self._classify(claim, memory_text, session_id, self._session_index)
@@ -350,7 +343,6 @@ class ClaimTracker:
                 session_index=session_index,
                 status=ClaimStatus.ABSENT,
             )
-        # Claim is in memory — does it still carry an epistemic qualifier?
         if _has_qualifier(fragment):
             return ClaimSurvivalResult(
                 claim_id=claim.claim_id,

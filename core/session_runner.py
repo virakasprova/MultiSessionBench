@@ -133,13 +133,64 @@ class SessionRunner:
             writes=writes,
             cost=cost,
             transcript=_format_transcript(msgs),
-            messages=[
-                {"role": m.get("role"), "content": (m.get("content", "") or "")[:400]}
-                for m in msgs
-                if m.get("role") != "system"
-            ],
+            messages=_preserve_messages(msgs),
         )
         return SessionResult(mechanical=mechanical, judge=None, contradicted=None, compliance=None)
+
+
+# Memory consumers (structured-turn providers) need to reconstruct the agent
+# loop, not just the dialogue, so we preserve tool_calls metadata on assistant
+# messages and the tool name on tool messages. Content stays capped (cheap
+# logging is not the goal here; analysis fidelity is).
+_MESSAGE_CONTENT_DIALOGUE_MAX = 4000
+_MESSAGE_CONTENT_TOOL_MAX = 4000
+
+
+def _preserve_messages(msgs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return a JSON-serialisable, role-aware copy of ``msgs`` (system stripped).
+
+    Schema per element:
+        {"role": "user"|"assistant"|"tool",
+         "content": str,
+         # assistant-only when a tool was invoked:
+         "tool_calls": [{"name": str, "arguments": str}],
+         # tool-only:
+         "name": str}
+    """
+    out: list[dict[str, Any]] = []
+    for m in msgs:
+        role = m.get("role")
+        if role == "system":
+            continue
+        content = (m.get("content") or "")
+        if role == "tool":
+            entry: dict[str, Any] = {
+                "role": "tool",
+                "content": content[:_MESSAGE_CONTENT_TOOL_MAX],
+                "name": m.get("name") or "",
+            }
+        elif role == "assistant":
+            entry = {
+                "role": "assistant",
+                "content": content[:_MESSAGE_CONTENT_DIALOGUE_MAX],
+            }
+            tool_calls = [
+                {
+                    "name": tc["function"].get("name", ""),
+                    "arguments": tc["function"].get("arguments", "") or "",
+                }
+                for tc in (m.get("tool_calls") or [])
+                if tc.get("function")
+            ]
+            if tool_calls:
+                entry["tool_calls"] = tool_calls
+        else:
+            entry = {
+                "role": role or "",
+                "content": content[:_MESSAGE_CONTENT_DIALOGUE_MAX],
+            }
+        out.append(entry)
+    return out
 
 
 def _clip(s: str, max_len: int) -> str:

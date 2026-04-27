@@ -9,7 +9,7 @@ from typing import Literal, Optional
 
 import numpy as np
 
-from memory2.base import BaseMemoryProvider, Session, Turn
+from memory.base import BaseMemoryProvider, Session, Turn
 
 
 @dataclass
@@ -44,13 +44,56 @@ class SentenceTransformerBackend(EmbeddingBackend):
 
 
 class OpenAIEmbeddingBackend(EmbeddingBackend):
-    def __init__(self, model: str = "text-embedding-3-small"):
+    """OpenAI-compatible embeddings.
+
+    By default talks to api.openai.com using ``OPENAI_API_KEY``. Pass
+    ``base_url`` and ``api_key`` to point at any OpenAI-compatible endpoint
+    (e.g. OpenRouter at https://openrouter.ai/api/v1, in which case
+    ``model="openai/text-embedding-3-small"`` is the canonical id).
+    """
+
+    def __init__(
+        self,
+        model: str = "text-embedding-3-small",
+        *,
+        api_key: Optional[str] = None,
+        base_url: Optional[str] = None,
+    ):
         from openai import OpenAI
-        self.client = OpenAI()
+        client_kwargs: dict = {}
+        if api_key is not None:
+            client_kwargs["api_key"] = api_key
+        if base_url is not None:
+            client_kwargs["base_url"] = base_url
+        self.client = OpenAI(**client_kwargs)
         self.model = model
 
     def encode(self, texts):
+        if not texts:
+            return np.zeros((0, 0), dtype=np.float32)
+        # OpenAI / OpenRouter both reject empty-string inputs; OpenRouter in
+        # particular has been observed to return 200 with ``data: []`` rather
+        # than a structured 4xx, which the SDK then surfaces as the unhelpful
+        # ``ValueError("No embedding data received")``. Filter at the backend
+        # as a belt-and-braces guard (the RAG provider also filters its
+        # chunks, but any future caller of this backend gets the same
+        # protection for free).
+        if any(not (isinstance(t, str) and t.strip()) for t in texts):
+            raise ValueError(
+                f"OpenAIEmbeddingBackend.encode: refusing to send "
+                f"{sum(1 for t in texts if not (isinstance(t, str) and t.strip()))}"
+                f"/{len(texts)} empty/whitespace-only inputs to "
+                f"{self.model!r}; filter callers."
+            )
         response = self.client.embeddings.create(input=texts, model=self.model)
+        if not response.data or len(response.data) != len(texts):
+            raise RuntimeError(
+                f"OpenAIEmbeddingBackend.encode: model {self.model!r} returned "
+                f"{len(response.data) if response.data else 0} embeddings for "
+                f"{len(texts)} inputs (first input prefix: "
+                f"{(texts[0][:80] if texts else '')!r}). Likely a transient "
+                f"OpenRouter / upstream issue; retry the run."
+            )
         arr = np.array([item.embedding for item in response.data], dtype=np.float32)
         norms = np.linalg.norm(arr, axis=1, keepdims=True)
         return arr / np.where(norms == 0, 1, norms)
@@ -90,6 +133,12 @@ class RAGMemoryProvider(BaseMemoryProvider):
         new_chunks = (self._chunk_by_turn(turns, session_id, user_type, user_id)
                       if self.chunk_by == "turn"
                       else self._chunk_by_session(turns, session_id, user_type, user_id))
+        # Drop chunks with no embeddable content. tau-bench tool turns can
+        # carry empty ``content`` when a tool returns only structured
+        # metadata (``messages_to_turns`` forwards them faithfully for the
+        # other providers, but they have nothing to retrieve on here and
+        # most embeddings APIs reject empty strings).
+        new_chunks = [c for c in new_chunks if c.text and c.text.strip()]
         if new_chunks:
             embeddings = self.backend.encode([c.text for c in new_chunks])
             for chunk, emb in zip(new_chunks, embeddings):

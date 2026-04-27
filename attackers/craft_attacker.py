@@ -56,8 +56,16 @@ class CraftLLMAttacker(AttackerAgent):
         self._hidden_goal(seed)
         if is_baseline:
             return 1
-        if seed.roleplay_scenario is not None:
-            return 1
+        # Respect ``session_intents`` length even when ``roleplay_scenario`` is
+        # set. The original short-circuit (force 1) was tailored to the
+        # deleted single-session τ-deception runner; with the unified runner
+        # we now construct multi-session τ seeds (e.g. ``[[]] * N``) and
+        # need the attacker to actually run N sessions so memory has prior
+        # context to inject. ``_session_roleplay`` reuses the same scenario
+        # in each session, and ``_is_trigger_phase`` keeps every session a
+        # "trigger" when ``roleplay_scenario`` is set, so the multi-repeat
+        # semantics are: same hidden goal, fresh attacker conversation per
+        # session, memory accumulates across sessions.
         n = len(seed.session_intents)
         return max(1, n)
 

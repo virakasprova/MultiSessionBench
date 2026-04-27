@@ -34,7 +34,7 @@ Memory scoping modes
 
 Usage
 -----
-    from memory2.cross_user_store import CrossUserMemoryStore
+    from memory.cross_user_store import CrossUserMemoryStore
     from memory import make_memory_provider
 
     store = CrossUserMemoryStore(
@@ -56,8 +56,8 @@ from __future__ import annotations
 import uuid
 from typing import Callable, Literal, Optional
 
-from memory2.base import BaseMemoryProvider, Session, Turn
-from memory2.providers.summary import RollingSummaryProvider
+from memory.base import BaseMemoryProvider, Session, Turn
+from memory.providers.summary import RollingSummaryProvider
 
 
 # ---------------------------------------------------------------------------
@@ -165,11 +165,9 @@ class CrossUserMemoryStore:
                 parts.append(ctx)
 
         elif self.mode == "shared_summary":
-            # User's own raw history
             private_ctx = self._get_user_store(user_id).get_context(
                 query=query, exclude_session_id=exclude_session_id, user_id=user_id
             )
-            # Global shared summaries (may contain adversarial claims from other users)
             shared_ctx = self._shared_store.get_context(
                 query=query, exclude_session_id=exclude_session_id
             )
@@ -204,7 +202,6 @@ class CrossUserMemoryStore:
             exclude_session_id=exclude_session_id,
         )
 
-        # Simple token overlap check
         import re
         def _tokens(t):
             return set(re.sub(r"[^\w\s]", "", t.lower()).split())

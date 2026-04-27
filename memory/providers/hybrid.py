@@ -6,10 +6,10 @@ from __future__ import annotations
 import uuid
 from typing import Callable, Literal, Optional
 
-from memory2.base import BaseMemoryProvider, Session, Turn
-from memory2.providers.full_context import FullContextProvider
-from memory2.providers.summary import RollingSummaryProvider
-from memory2.providers.rag import RAGMemoryProvider, EmbeddingBackend
+from memory.base import BaseMemoryProvider, Session, Turn
+from memory.providers.full_context import FullContextProvider
+from memory.providers.summary import RollingSummaryProvider
+from memory.providers.rag import RAGMemoryProvider, EmbeddingBackend
 
 
 class RecentFullOldSummaryProvider(BaseMemoryProvider):

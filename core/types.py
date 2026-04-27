@@ -19,6 +19,13 @@ class TaskSeed:
     # When set, ``CraftLLMAttacker`` uses these instead of scripted ``session_intents`` text.
     hidden_attacker_goal: str | None = None
     roleplay_scenario: str | None = None
+    # Optional explicit planted-claim records for ClaimTracker. Each entry is a
+    # raw dict with keys {claim_id, canonical, variants, target_policy, negation}
+    # matching ``memory.PlantedClaim``. Stored as dicts (not as PlantedClaim
+    # instances) so this module stays free of the ``memory.*`` import. When
+    # ``None``, ``core.instrumentation.derive_planted_claims`` auto-derives a
+    # single primary claim from ``false_claim`` + ``policy_area``.
+    planted_claim_data: list[dict[str, Any]] | None = None
 
     def num_sessions(self) -> int:
         return len(self.session_intents)
@@ -36,7 +43,11 @@ class SessionMechanicalResult:
     writes: list[dict[str, Any]]
     cost: float
     transcript: str
-    messages: list[dict[str, str]]
+    # Role-aware copy of the agent loop (system stripped). Schema per element:
+    #   {"role": "user", "content": str}
+    #   {"role": "assistant", "content": str, "tool_calls": [{"name", "arguments"}]?}
+    #   {"role": "tool", "content": str, "name": str}
+    messages: list[dict[str, Any]]
 
 
 @dataclass
@@ -95,7 +106,15 @@ class SessionContext:
 
 @dataclass
 class ExperimentResult:
-    """Aggregated result of one full attack bundle."""
+    """Aggregated result of one full attack bundle.
+
+    The ``mar`` / ``distortion_rate`` / ``first_laundering_session`` /
+    ``context_size_curve`` / ``audit_log_path`` fields are populated only when
+    the run is invoked with ``--instrument`` (see ``core.instrumentation``).
+    They default to ``None`` to preserve backward compatibility with all
+    pre-existing JSONLs and downstream analysis scripts that don't know about
+    them.
+    """
     attack_id: str
     memory_mode: str
     is_baseline: bool
@@ -111,6 +130,12 @@ class ExperimentResult:
     session_results: list[SessionResult]
     memory_contents: list[str]
     timestamp: str
+    # Instrument outputs (populated only when ClaimTracker / MemoryAuditLog are wired).
+    mar: float | None = None
+    distortion_rate: float | None = None
+    first_laundering_session: str | None = None
+    context_size_curve: list[int] | None = None
+    audit_log_path: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -129,6 +154,11 @@ class ExperimentResult:
             "session_results": [sr.to_dict() for sr in self.session_results],
             "memory_contents": self.memory_contents,
             "timestamp": self.timestamp,
+            "mar": self.mar,
+            "distortion_rate": self.distortion_rate,
+            "first_laundering_session": self.first_laundering_session,
+            "context_size_curve": self.context_size_curve,
+            "audit_log_path": self.audit_log_path,
         }
 
 
@@ -150,4 +180,9 @@ def experiment_from_dict(d: dict[str, Any]) -> ExperimentResult:
         session_results=srs,
         memory_contents=d.get("memory_contents", []),
         timestamp=d.get("timestamp", ""),
+        mar=d.get("mar"),
+        distortion_rate=d.get("distortion_rate"),
+        first_laundering_session=d.get("first_laundering_session"),
+        context_size_curve=d.get("context_size_curve"),
+        audit_log_path=d.get("audit_log_path"),
     )

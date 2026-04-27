@@ -1,0 +1,7 @@
+{
+  "pythonVersion": "3.12",
+  "pythonPlatform": "Darwin",
+  "venvPath": "/opt/anaconda3",
+  "venv": ".",
+  "reportMissingImports": "warning"
+}

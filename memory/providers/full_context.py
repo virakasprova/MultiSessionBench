@@ -4,7 +4,7 @@ memory/providers/full_context.py
 from __future__ import annotations
 import uuid
 from typing import Literal, Optional
-from memory2.base import BaseMemoryProvider, Session, Turn
+from memory.base import BaseMemoryProvider, Session, Turn
 
 
 class NoMemoryProvider(BaseMemoryProvider):

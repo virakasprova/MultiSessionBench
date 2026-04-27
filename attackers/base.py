@@ -1,4 +1,4 @@
-"""AttackerAgent ABC — same pattern as ``memory.base.MemoryProvider``."""
+"""AttackerAgent ABC — same pattern as ``memory.base.BaseMemoryProvider``."""
 from __future__ import annotations
 
 from abc import ABC, abstractmethod

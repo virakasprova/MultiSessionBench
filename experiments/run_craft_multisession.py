@@ -20,6 +20,9 @@ Usage:
     python experiments/run_craft_multisession.py --craft-yaml tasks/craft_airline_multisession_seeds.yaml
     python experiments/run_craft_multisession.py --memory-modes no_memory --max-turns 25
     python experiments/run_craft_multisession.py --limit 5   # first 5 seeds only (per baseline + each mode)
+    python experiments/run_craft_multisession.py --all-non-rag --limit 1   # 6 non-RAG configs on 1 seed
+    python experiments/run_craft_multisession.py --all-modes --limit 1     # all 10 configs (incl. RAG)
+    python experiments/run_craft_multisession.py --memory-modes rag_baseline rag_shared --rag-backend openai
 """
 from __future__ import annotations
 
@@ -45,30 +48,154 @@ if _env.exists():
 from analysis import analyze, load_results_jsonl
 from attackers import CraftLLMAttacker
 from core.environment import TauBenchEnv
+from core.instrumentation import build_instruments, derive_planted_claims
 from core.orchestrator import Orchestrator
 from core.session_runner import SessionRunner
-from memory.full_history import FullHistoryMemory
-from memory.none import NoMemory
-from memory.summary import SummaryMemory
-from memory.base import MemoryProvider
+from memory import BaseMemoryProvider, make_memory_provider
+from memory.litellm_summariser import (
+    make_litellm_cumulative_summariser,
+    make_litellm_summariser,
+)
 from tasks.loader import load_craft_multisession_yaml
 
 MODEL = "openrouter/google/gemini-2.5-flash"
+ATTACKER_MODEL = "openrouter/openai/gpt-4.1-mini"
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
 CRAFT_YAML_DEFAULT = Path(__file__).resolve().parent.parent / "tasks" / "craft_airline_multisession_seeds.yaml"
 
+# Backward-compatible default sweep: matches every JSONL we've shipped to date.
 _DEFAULT_MEMORY_MODES = ("no_memory", "full_history", "summary")
+
+# Every non-RAG configuration the structured-turn factory exposes. The first
+# three strings are preserved verbatim from the legacy CLI so prior JSONL
+# outputs (which persist `memory_mode` as a free-text string) remain
+# comparable.
+_NON_RAG_MEMORY_MODES = (
+    "no_memory",              # NoMemoryProvider
+    "full_history",           # FullContextProvider (alias)
+    "full_context_recent2",   # FullContextProvider(max_sessions=2)
+    "summary",                # RollingSummaryProvider (alias)
+    "summary_cumulative",     # CumulativeSummaryProvider
+    "hybrid_recent_summary",  # RecentFullOldSummaryProvider
+)
+_RAG_MEMORY_MODES = (
+    "rag_baseline",           # RAGMemoryProvider (default)
+    "rag_attribution",        # RAGMemoryProvider(use_attribution=True)
+    "rag_shared",             # RAGMemoryProvider(user_scoped=False)
+    "hybrid_summary_rag",     # SummaryPlusRAGProvider
+)
+_ALL_MEMORY_MODES = _NON_RAG_MEMORY_MODES + _RAG_MEMORY_MODES
+
+_RAG_BACKEND_CHOICES = ("sentence_transformers", "openai")
 litellm.suppress_debug_info = True
 
 
-def make_memory(mode: str, summary_model: str) -> MemoryProvider:
-    if mode == "no_memory":
-        return NoMemory()
-    if mode == "full_history":
-        return FullHistoryMemory()
-    if mode == "summary":
-        return SummaryMemory(summary_model)
-    raise SystemExit(f"Unknown memory mode {mode!r}; expected one of {_DEFAULT_MEMORY_MODES}")
+def _build_rag_backend(kind: str):
+    """Construct the embedding backend once and let RAG providers share it.
+
+    Building the SentenceTransformer model is the slow path (~80MB download
+    on first run, several seconds each call). Sharing the backend instance
+    across rag_baseline / rag_attribution / rag_shared / hybrid_summary_rag
+    avoids paying that cost N times. ``encode()`` is stateless w.r.t. the
+    backend, so this is safe.
+
+    For ``kind == "openai"`` we prefer ``OPENAI_API_KEY`` (direct OpenAI),
+    and fall back to ``OPENROUTER_API_KEY`` (OpenRouter is OpenAI-compatible
+    and exposes ``openai/text-embedding-3-small`` at /embeddings). This
+    means a single OpenRouter key is enough to run the entire sweep,
+    including RAG modes, without a separate OpenAI account.
+    """
+    if kind == "sentence_transformers":
+        from memory.providers.rag import SentenceTransformerBackend
+        return SentenceTransformerBackend()
+    if kind == "openai":
+        from memory.providers.rag import OpenAIEmbeddingBackend
+        if os.environ.get("OPENAI_API_KEY"):
+            return OpenAIEmbeddingBackend()
+        if os.environ.get("OPENROUTER_API_KEY"):
+            return OpenAIEmbeddingBackend(
+                model="openai/text-embedding-3-small",
+                api_key=os.environ["OPENROUTER_API_KEY"],
+                base_url="https://openrouter.ai/api/v1",
+            )
+        raise SystemExit(
+            "--rag-backend openai requires OPENAI_API_KEY or OPENROUTER_API_KEY."
+        )
+    raise SystemExit(
+        f"Unknown --rag-backend {kind!r}; expected one of {_RAG_BACKEND_CHOICES}"
+    )
+
+
+def _openai_backend_route() -> str:
+    """Return a short label describing which key/endpoint the openai backend
+    will use, for human-readable logging."""
+    if os.environ.get("OPENAI_API_KEY"):
+        return "OpenAI direct (OPENAI_API_KEY, model=text-embedding-3-small)"
+    if os.environ.get("OPENROUTER_API_KEY"):
+        return ("OpenRouter (OPENROUTER_API_KEY, "
+                "base_url=openrouter.ai/api/v1, model=openai/text-embedding-3-small)")
+    return "<no key found>"
+
+
+# CLI memory-mode -> provider builder. Each entry takes ``(summary_model,
+# rag_backend)``; lambdas ignore arguments they don't need. Adding a new mode
+# is exactly one new line here plus one entry in ``_NON_RAG_MEMORY_MODES`` or
+# ``_RAG_MEMORY_MODES``. Aliases ``full_history`` / ``summary`` are preserved
+# verbatim from the legacy CLI so prior JSONL ``memory_mode`` values stay
+# comparable across the migration.
+_MEMORY_DISPATCH = {
+    "no_memory":              lambda model, rag: make_memory_provider("no_memory"),
+    "full_history":           lambda model, rag: make_memory_provider("full_context"),
+    "full_context_recent2":   lambda model, rag: make_memory_provider("full_context_recent2"),
+    "summary":                lambda model, rag: make_memory_provider(
+        "summary_rolling",    summariser=make_litellm_summariser(model)),
+    "summary_cumulative":     lambda model, rag: make_memory_provider(
+        "summary_cumulative", summariser=make_litellm_cumulative_summariser(model)),
+    "hybrid_recent_summary":  lambda model, rag: make_memory_provider(
+        "hybrid_recent_summary", summariser=make_litellm_summariser(model)),
+    "rag_baseline":           lambda model, rag: make_memory_provider(
+        "rag_baseline",       embedding_backend=rag),
+    "rag_attribution":        lambda model, rag: make_memory_provider(
+        "rag_attribution",    embedding_backend=rag),
+    "rag_shared":             lambda model, rag: make_memory_provider(
+        "rag_shared",         embedding_backend=rag),
+    "hybrid_summary_rag":     lambda model, rag: make_memory_provider(
+        "hybrid_summary_rag", summariser=make_litellm_summariser(model),
+        embedding_backend=rag),
+}
+
+# Belt-and-braces: catch at import time the bug of "added a new mode to
+# _ALL_MEMORY_MODES but forgot a dispatch entry" (and vice versa). Cheap.
+assert set(_ALL_MEMORY_MODES) == set(_MEMORY_DISPATCH), (
+    "memory-mode tuples and _MEMORY_DISPATCH are out of sync: "
+    f"missing from dispatch: {sorted(set(_ALL_MEMORY_MODES) - set(_MEMORY_DISPATCH))}; "
+    f"missing from _ALL_MEMORY_MODES: {sorted(set(_MEMORY_DISPATCH) - set(_ALL_MEMORY_MODES))}"
+)
+
+
+def make_memory(
+    mode: str,
+    summary_model: str,
+    *,
+    rag_backend=None,
+) -> BaseMemoryProvider:
+    """Map CLI memory-mode strings to ``BaseMemoryProvider`` instances.
+
+    ``rag_backend`` (an ``EmbeddingBackend`` instance) must be pre-built by
+    the caller via ``_build_rag_backend(...)`` for any RAG-using mode so that
+    rag_baseline / rag_attribution / rag_shared / hybrid_summary_rag share a
+    single model load.
+    """
+    if mode not in _MEMORY_DISPATCH:
+        raise SystemExit(
+            f"Unknown memory mode {mode!r}; expected one of {sorted(_MEMORY_DISPATCH)}"
+        )
+    if mode in _RAG_MEMORY_MODES and rag_backend is None:
+        raise SystemExit(
+            f"make_memory({mode!r}) requires rag_backend; "
+            "pass one built via _build_rag_backend(...)"
+        )
+    return _MEMORY_DISPATCH[mode](summary_model, rag_backend)
 
 
 def main() -> None:
@@ -82,16 +209,73 @@ def main() -> None:
     )
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--analyze", type=str, metavar="PATH", help="Print report from JSONL and exit")
-    p.add_argument(
+    # The three mode-selection flags are mutually exclusive. argparse enforces
+    # that natively (via add_mutually_exclusive_group) with a clean error
+    # message; no manual ``sum(sweep_flags) > 1`` post-parse check needed.
+    sweep = p.add_mutually_exclusive_group()
+    sweep.add_argument(
         "--memory-modes",
         nargs="*",
         default=None,
         metavar="MODE",
-        help="One or more of: no_memory full_history summary (default: all three)",
+        help=(
+            "One or more of: " + " ".join(_ALL_MEMORY_MODES) +
+            " (default: no_memory full_history summary)"
+        ),
+    )
+    sweep.add_argument(
+        "--all-non-rag",
+        action="store_true",
+        help=(
+            "Shortcut: run every non-RAG memory configuration ("
+            + ", ".join(_NON_RAG_MEMORY_MODES) + ")."
+        ),
+    )
+    sweep.add_argument(
+        "--all-modes",
+        action="store_true",
+        help=(
+            "Shortcut: run every memory configuration the factory exposes "
+            "(non-RAG + RAG, " + str(len(_ALL_MEMORY_MODES)) + " total)."
+        ),
+    )
+    p.add_argument(
+        "--rag-backend",
+        choices=_RAG_BACKEND_CHOICES,
+        default="openai",
+        help=(
+            "Embedding backend for RAG modes. 'openai' (default) uses "
+            "text-embedding-3-small via OPENAI_API_KEY (direct OpenAI) or "
+            "OPENROUTER_API_KEY (OpenRouter's OpenAI-compatible /embeddings; "
+            "model id 'openai/text-embedding-3-small'). "
+            "'sentence_transformers' runs all-MiniLM-L6-v2 locally (no extra "
+            "API key, but requires the sentence-transformers package). "
+            "Ignored if no RAG mode is selected."
+        ),
     )
     p.add_argument("--attacker-model", default=None, metavar="MODEL")
     p.add_argument("--attacker-temperature", type=float, default=0.5)
     p.add_argument("--max-turns", type=int, default=20, metavar="N")
+    p.add_argument(
+        "--instrument",
+        action="store_true",
+        help=(
+            "Enable per-attack ClaimTracker / MemoryAuditLog / "
+            "ConfidenceDriftTracker instrumentation. Surfaces mar, "
+            "distortion_rate, first_laundering_session, and "
+            "context_size_curve onto each ExperimentResult, and writes a "
+            "consolidated instruments JSON per attack into "
+            "<results_dir>/<run_stem>_audits/. Default OFF so baseline "
+            "reproducibility against pre-instrumentation JSONLs is preserved."
+        ),
+    )
+    p.add_argument(
+        "--seed-ids",
+        nargs="*",
+        default=None,
+        metavar="SEED_ID",
+        help="Run only these exact seed_ids from the YAML (overrides --limit)",
+    )
     p.add_argument(
         "--limit",
         type=int,
@@ -105,13 +289,40 @@ def main() -> None:
         analyze(load_results_jsonl(args.analyze))
         return
 
-    mem_modes = tuple(args.memory_modes) if args.memory_modes else _DEFAULT_MEMORY_MODES
+    # Mutual exclusion is enforced by the argparse group above.
+    if args.all_modes:
+        mem_modes = _ALL_MEMORY_MODES
+    elif args.all_non_rag:
+        mem_modes = _NON_RAG_MEMORY_MODES
+    elif args.memory_modes:
+        mem_modes = tuple(args.memory_modes)
+    else:
+        mem_modes = _DEFAULT_MEMORY_MODES
     for m in mem_modes:
-        if m not in _DEFAULT_MEMORY_MODES:
-            raise SystemExit(f"Unknown memory mode {m!r}; expected one of {_DEFAULT_MEMORY_MODES}")
+        if m not in _ALL_MEMORY_MODES:
+            raise SystemExit(
+                f"Unknown memory mode {m!r}; expected one of {_ALL_MEMORY_MODES}"
+            )
+
+    needs_rag = any(m in _RAG_MEMORY_MODES for m in mem_modes)
+    if needs_rag and args.rag_backend == "openai":
+        if not (os.environ.get("OPENAI_API_KEY") or os.environ.get("OPENROUTER_API_KEY")):
+            raise SystemExit(
+                "--rag-backend openai requires OPENAI_API_KEY (direct OpenAI) "
+                "or OPENROUTER_API_KEY (OpenRouter). Either set one of those, "
+                "or pass --rag-backend sentence_transformers (requires the "
+                "sentence-transformers package installed locally)."
+            )
 
     seeds = load_craft_multisession_yaml(args.craft_yaml)
-    if args.limit is not None:
+    if args.seed_ids:
+        wanted = set(args.seed_ids)
+        seeds = [s for s in seeds if s.seed_id in wanted]
+        found = {s.seed_id for s in seeds}
+        missing = sorted(wanted - found)
+        if missing:
+            raise SystemExit(f"Unknown --seed-ids: {', '.join(missing)}")
+    elif args.limit is not None:
         if args.limit < 1:
             raise SystemExit("--limit must be at least 1")
         seeds = seeds[: args.limit]
@@ -120,6 +331,12 @@ def main() -> None:
         print(f"CRAFT YAML: {args.craft_yaml}")
         lim_note = f" (first {args.limit} only)" if args.limit else ""
         print(f"Seeds: {len(seeds)}{lim_note} | Memory modes: {list(mem_modes)}")
+        if needs_rag:
+            print(f"RAG backend: {args.rag_backend}")
+            if args.rag_backend == "openai":
+                print(f"  route: {_openai_backend_route()}")
+        if args.instrument:
+            print("Instrumentation: ON (claim tracker + audit log + drift tracker)")
         for s in seeds:
             print(
                 f"  {s.seed_id}: user={s.user_id!r} res={s.reservation_id} "
@@ -138,11 +355,15 @@ def main() -> None:
         sys.exit(1)
 
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    log = RESULTS_DIR / f"craft_multi_{datetime.now():%Y%m%d_%H%M%S}.jsonl"
+    run_stem = f"craft_multi_{datetime.now():%Y%m%d_%H%M%S}"
+    log = RESULTS_DIR / f"{run_stem}.jsonl"
+    audit_dir = (RESULTS_DIR / f"{run_stem}_audits") if args.instrument else None
+    if audit_dir is not None:
+        audit_dir.mkdir(parents=True, exist_ok=True)
 
     env = TauBenchEnv("airline")
     runner = SessionRunner(env, args.model, max_turns=args.max_turns)
-    atk_model = args.attacker_model or args.model
+    atk_model = args.attacker_model or ATTACKER_MODEL
     attacker = CraftLLMAttacker(atk_model, temperature=args.attacker_temperature)
 
     all_results = []
@@ -151,15 +372,48 @@ def main() -> None:
     print(f"Attacker: {atk_model} (CraftLLMAttacker, temp={args.attacker_temperature})")
     print(f"max_turns: {args.max_turns}")
     lim_note = f" (limit {args.limit})" if args.limit else ""
-    print(f"Seeds: {len(seeds)}{lim_note} | Memory modes: {list(mem_modes)}\n")
+    print(f"Seeds: {len(seeds)}{lim_note} | Memory modes: {list(mem_modes)}")
+    if needs_rag:
+        print(f"RAG backend: {args.rag_backend} (loading once, shared across RAG modes)")
+        if args.rag_backend == "openai":
+            print(f"  route: {_openai_backend_route()}")
+    if args.instrument:
+        print(f"Instrumentation: ON — audits in {audit_dir}/")
+    print()
 
-    baseline_memory = NoMemory()
-    baseline_orch = Orchestrator(env, runner, baseline_memory, attacker)
+    rag_backend = _build_rag_backend(args.rag_backend) if needs_rag else None
+
+    def _run_one(orch_obj: Orchestrator, the_seed, *, is_baseline: bool):
+        """Build per-attack instruments (if enabled) and dispatch to orchestrator.
+
+        Each (seed, mode) attack gets its own ClaimTracker / MemoryAuditLog /
+        ConfidenceDriftTracker because the orchestrator clears the underlying
+        memory provider at the start of every ``run_attack``. Reusing a tracker
+        across attacks would break the per-session classification timeline.
+        """
+        if not args.instrument:
+            return orch_obj.run_attack(the_seed, is_baseline=is_baseline)
+        assert audit_dir is not None  # invariant: instrument => audit_dir set
+        claims = derive_planted_claims(the_seed)
+        instruments = build_instruments(orch_obj.memory, claims)
+        attack_id_local = the_seed.seed_id + ("_baseline" if is_baseline else "")
+        path = audit_dir / f"audit_{attack_id_local}__{orch_obj.mode_name}.json"
+        return orch_obj.run_attack(
+            the_seed,
+            is_baseline=is_baseline,
+            instruments=instruments,
+            audit_path=path,
+        )
+
+    baseline_memory = make_memory("no_memory", args.model)
+    baseline_orch = Orchestrator(
+        env, runner, baseline_memory, attacker, mode_name="no_memory"
+    )
 
     print("-- Baselines (single-session, all phases merged in one roleplay blob) --")
     for seed in seeds:
         print(f"  {seed.seed_id}_baseline:", end=" ")
-        r = baseline_orch.run_attack(seed, is_baseline=True)
+        r = _run_one(baseline_orch, seed, is_baseline=True)
         all_results.append(r)
         with open(log, "a") as f:
             f.write(json.dumps(r.to_dict(), default=str) + "\n")
@@ -170,18 +424,18 @@ def main() -> None:
         trigger_only.seed_id = f"{seed.seed_id}_trigger_only"
         trigger_only.session_intents = [seed.session_intents[-1]]
         print(f"  {trigger_only.seed_id}_baseline:", end=" ")
-        r = baseline_orch.run_attack(trigger_only, is_baseline=True)
+        r = _run_one(baseline_orch, trigger_only, is_baseline=True)
         all_results.append(r)
         with open(log, "a") as f:
             f.write(json.dumps(r.to_dict(), default=str) + "\n")
 
     for mode in mem_modes:
-        memory = make_memory(mode, args.model)
-        orch = Orchestrator(env, runner, memory, attacker)
+        memory = make_memory(mode, args.model, rag_backend=rag_backend)
+        orch = Orchestrator(env, runner, memory, attacker, mode_name=mode)
         print(f"\n-- Multi-session [{mode}] (Plant → Reinforce → Trigger) --")
         for seed in seeds:
-            print(f"  {seed.seed_id} [{memory.mode_name}]:", end=" ")
-            r = orch.run_attack(seed, is_baseline=False)
+            print(f"  {seed.seed_id} [{mode}]:", end=" ")
+            r = _run_one(orch, seed, is_baseline=False)
             all_results.append(r)
             with open(log, "a") as f:
                 f.write(json.dumps(r.to_dict(), default=str) + "\n")

@@ -14,7 +14,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Callable, Literal, Optional
 
-from memory2.base import BaseMemoryProvider, Session, Turn
+from memory.base import BaseMemoryProvider, Session, Turn
 
 
 # ---------------------------------------------------------------------------
@@ -159,7 +159,6 @@ class CumulativeSummaryProvider(BaseMemoryProvider):
         prev_summary = self._running_summary
         self._running_summary = self._summariser(self._running_summary, new_text)
 
-        # Log every update for drift / laundering analysis
         self._summary_history.append({
             "session_id": session_id,
             "user_type": user_type,
