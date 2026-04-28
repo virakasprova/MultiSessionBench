@@ -59,7 +59,7 @@ from memory.litellm_summariser import (
 from tasks.loader import load_craft_multisession_yaml
 
 MODEL = "openrouter/google/gemini-2.5-flash"
-ATTACKER_MODEL = "openrouter/openai/gpt-4.1-mini"
+ATTACKER_MODEL = "openai/gpt-4.1-mini"
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
 CRAFT_YAML_DEFAULT = Path(__file__).resolve().parent.parent / "tasks" / "craft_airline_multisession_seeds.yaml"
 
@@ -90,7 +90,7 @@ _RAG_BACKEND_CHOICES = ("sentence_transformers", "openai")
 litellm.suppress_debug_info = True
 
 
-def _build_rag_backend(kind: str):
+def _build_rag_backend(kind: str, api_base: str | None = None):
     """Construct the embedding backend once and let RAG providers share it.
 
     Building the SentenceTransformer model is the slow path (~80MB download
@@ -111,7 +111,9 @@ def _build_rag_backend(kind: str):
     if kind == "openai":
         from memory.providers.rag import OpenAIEmbeddingBackend
         if os.environ.get("OPENAI_API_KEY"):
-            return OpenAIEmbeddingBackend()
+            return OpenAIEmbeddingBackend(
+                **({"base_url": api_base} if api_base else {}),
+            )
         if os.environ.get("OPENROUTER_API_KEY"):
             return OpenAIEmbeddingBackend(
                 model="openai/text-embedding-3-small",
@@ -298,6 +300,12 @@ def main() -> None:
     )
     p.add_argument("--attacker-model", default=None, metavar="MODEL")
     p.add_argument("--attacker-temperature", type=float, default=0.5)
+    p.add_argument(
+        "--api-base",
+        default=None,
+        metavar="URL",
+        help="Base URL for OpenAI-compatible API calls (attacker model and RAG backend).",
+    )
     p.add_argument("--max-turns", type=int, default=20, metavar="N")
     p.add_argument(
         "--human-attacker",
@@ -435,7 +443,11 @@ def main() -> None:
             )
         attacker = HumanAttacker()
     else:
-        attacker = CraftLLMAttacker(atk_model, temperature=args.attacker_temperature)
+        attacker = CraftLLMAttacker(
+            atk_model,
+            temperature=args.attacker_temperature,
+            api_base=args.api_base,
+        )
 
     all_results = []
 
@@ -455,7 +467,7 @@ def main() -> None:
         print(f"Instrumentation: ON — audits in {audit_dir}/")
     print()
 
-    rag_backend = _build_rag_backend(args.rag_backend) if needs_rag else None
+    rag_backend = _build_rag_backend(args.rag_backend, api_base=args.api_base) if needs_rag else None
 
     def _run_one(orch_obj: Orchestrator, the_seed, *, is_baseline: bool):
         """Build per-attack instruments (if enabled) and dispatch to orchestrator.

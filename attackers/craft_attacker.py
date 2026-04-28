@@ -31,11 +31,13 @@ class CraftLLMAttacker(AttackerAgent):
         temperature: float = 0.5,
         max_tokens: int = 1024,
         seed: int = 42,
+        api_base: str | None = None,
     ):
         self.model = model
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.seed = seed
+        self.api_base = api_base
         self._system_prompt: str = ""
 
     @staticmethod
@@ -167,6 +169,7 @@ class CraftLLMAttacker(AttackerAgent):
             temperature=self.temperature,
             max_tokens=self.max_tokens,
             seed=self.seed,
+            **({"api_base": self.api_base} if self.api_base else {}),
         )
         return (res.choices[0].message.content or "").strip()
 
