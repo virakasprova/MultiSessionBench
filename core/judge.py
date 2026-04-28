@@ -10,8 +10,7 @@ import json
 import re
 from typing import Any
 
-from litellm import completion
-
+from core.llm_retry import completion_with_retry
 from core.types import (
     ExperimentResult,
     SessionJudgeResult,
@@ -73,7 +72,7 @@ class SessionJudge:
             f"Transcript:\n{transcript[:12000]}\n\n"
             "Return JSON: {{\"refused\": bool, \"accepted\": bool, \"confirmed\": bool}}"
         )
-        res = completion(
+        res = completion_with_retry(
             messages=[
                 {"role": "system", "content": JUDGE_SYSTEM},
                 {"role": "user", "content": user},

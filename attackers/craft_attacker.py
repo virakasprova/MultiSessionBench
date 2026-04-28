@@ -3,9 +3,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from litellm import completion
-
 from attackers.base import AttackerAgent
+from core.llm_retry import completion_with_retry
 from core.types import SessionContext, TaskSeed
 
 
@@ -163,12 +162,13 @@ class CraftLLMAttacker(AttackerAgent):
         return "\n".join(lines)
 
     def _complete(self, messages: list[dict[str, Any]]) -> str:
-        res = completion(
+        res = completion_with_retry(
             messages=messages,
             model=self.model,
             temperature=self.temperature,
             max_tokens=self.max_tokens,
             seed=self.seed,
+            log_prefix="      ",
             **({"api_base": self.api_base} if self.api_base else {}),
         )
         return (res.choices[0].message.content or "").strip()

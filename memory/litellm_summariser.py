@@ -58,11 +58,11 @@ def make_litellm_summariser(
     """
     # Imported lazily so importing this module doesn't require litellm at
     # module load time of any caller that just happens to ``from memory import ...``.
-    from litellm import completion
+    from core.llm_retry import completion_with_retry
 
     def _summarise(session_text: str) -> str:
         try:
-            response = completion(
+            response = completion_with_retry(
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": session_text},
@@ -70,6 +70,7 @@ def make_litellm_summariser(
                 model=model,
                 temperature=temperature,
                 max_tokens=max_tokens,
+                log_prefix="      ",
             )
             return (response.choices[0].message.content or "").strip()
         except Exception:
@@ -91,7 +92,7 @@ def make_litellm_cumulative_summariser(
     the empty string. Failures preserve the previous summary rather than
     raising, so a transient API hiccup never erases history.
     """
-    from litellm import completion
+    from core.llm_retry import completion_with_retry
 
     def _summarise(existing: str, new_text: str) -> str:
         prior_block = existing.strip() or "(no prior summary — this is the first session)"
@@ -101,7 +102,7 @@ def make_litellm_cumulative_summariser(
             "Return the updated running summary."
         )
         try:
-            response = completion(
+            response = completion_with_retry(
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_msg},
@@ -109,6 +110,7 @@ def make_litellm_cumulative_summariser(
                 model=model,
                 temperature=temperature,
                 max_tokens=max_tokens,
+                log_prefix="      ",
             )
             updated = (response.choices[0].message.content or "").strip()
             return updated or existing

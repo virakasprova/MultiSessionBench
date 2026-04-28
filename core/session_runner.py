@@ -8,9 +8,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from litellm import completion
-
 from attackers.base import AttackerAgent
+from core.llm_retry import completion_with_retry
 
 # Transcript limits for logging and memory injection. Tool outputs (e.g. get_reservation_details
 # JSON) must not be truncated mid-string — old 300-char caps broke full_history laundering analysis.
@@ -65,12 +64,13 @@ class SessionRunner:
 
         for _ in range(self.max_turns):
             try:
-                res = completion(
+                res = completion_with_retry(
                     messages=msgs,
                     model=self.model,
                     tools=self.env.tools_info,
                     temperature=0.0,
                     seed=self.seed,
+                    log_prefix="      ",
                 )
             except Exception as e:
                 print(f"      [LLM error: {e}]")
