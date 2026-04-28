@@ -15,15 +15,26 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Set an API key for real runs (OpenRouter is the default provider):
+Set an API key for real runs. The runner picks which env var it requires
+based on the model id you pass — no separate `--provider` flag.
+
 ```bash
+# OpenRouter (the shipped defaults: openrouter/google/gemini-2.5-flash etc.)
 export OPENROUTER_API_KEY=your_key_here
+
+# OpenAI direct — pass openai/* model ids and set OPENAI_API_KEY instead
+export OPENAI_API_KEY=your_key_here
+python experiments/run_craft_multisession.py \
+    --model openai/gpt-4o-mini \
+    --attacker-model openai/gpt-4.1-mini
 ```
 
-Or place `OPENROUTER_API_KEY=...` in `experiments/.env`.
+Either key can also live in `experiments/.env`.
 
-**Model strings** use LiteLLM's provider-prefix format (e.g.
-`openrouter/google/gemini-2.5-flash`). No separate `--provider` flag.
+**Model strings** use LiteLLM's provider-prefix format. The runner maps
+`openrouter/...` → `OPENROUTER_API_KEY`, `openai/...` (or no prefix) →
+`OPENAI_API_KEY`, `anthropic/...` → `ANTHROPIC_API_KEY`; other providers
+fall through to LiteLLM's own error.
 
 **RAG modes** additionally need either:
 - An embeddings key — same `OPENROUTER_API_KEY` works for the OpenRouter

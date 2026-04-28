@@ -126,6 +126,49 @@ def _build_rag_backend(kind: str):
     )
 
 
+def _provider_key_for_model(model_id: str) -> tuple[str, str] | None:
+    """Map a litellm model id to ``(env_var, human_provider_name)``.
+
+    Used by the startup gate so the runner accepts whatever provider the
+    requested ``--model`` / ``--attacker-model`` actually targets, instead
+    of always demanding ``OPENROUTER_API_KEY``. Returns ``None`` for
+    providers we don't have a runtime check for — litellm will surface its
+    own error if the matching env var is missing.
+
+    litellm's prefix conventions (the ones we exercise):
+      - ``openrouter/...``   -> OPENROUTER_API_KEY
+      - ``openai/...`` or no provider prefix -> OPENAI_API_KEY
+      - ``anthropic/...``    -> ANTHROPIC_API_KEY
+    """
+    if model_id.startswith("openrouter/"):
+        return ("OPENROUTER_API_KEY", "OpenRouter")
+    if model_id.startswith("openai/") or "/" not in model_id:
+        return ("OPENAI_API_KEY", "OpenAI")
+    if model_id.startswith("anthropic/"):
+        return ("ANTHROPIC_API_KEY", "Anthropic")
+    return None
+
+
+def _check_provider_keys(*model_ids: str) -> None:
+    """Exit if any required provider env var is missing for the given models.
+
+    Deduplicates: an agent + attacker that both target OpenRouter only
+    needs one ``OPENROUTER_API_KEY`` mention in the error message.
+    """
+    required: dict[str, str] = {}
+    for m in model_ids:
+        pair = _provider_key_for_model(m)
+        if pair is not None:
+            env, prov = pair
+            required.setdefault(env, prov)
+    missing = [(env, prov) for env, prov in required.items() if not os.environ.get(env)]
+    if missing:
+        for env, prov in missing:
+            print(f"Set {env} (required for {prov} model in this run; "
+                  f"or create experiments/.env)")
+        sys.exit(1)
+
+
 def _openai_backend_route() -> str:
     """Return a short label describing which key/endpoint the openai backend
     will use, for human-readable logging."""
@@ -363,9 +406,11 @@ def main() -> None:
         )
         return
 
-    if not os.environ.get("OPENROUTER_API_KEY"):
-        print("Set OPENROUTER_API_KEY or create experiments/.env")
-        sys.exit(1)
+    # Gate is model-aware: only require the env var matching the litellm
+    # prefix on the actual ``--model`` and ``--attacker-model`` (so e.g.
+    # ``--model openai/gpt-4o-mini`` runs against ``OPENAI_API_KEY``
+    # alone). Attacker model resolves to ATTACKER_MODEL when not passed.
+    _check_provider_keys(args.model, args.attacker_model or ATTACKER_MODEL)
 
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     run_stem = f"craft_multi_{datetime.now():%Y%m%d_%H%M%S}"

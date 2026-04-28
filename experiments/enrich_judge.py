@@ -42,8 +42,18 @@ def main() -> None:
     )
     args = p.parse_args()
 
-    if not os.environ.get("OPENROUTER_API_KEY"):
-        print("Set OPENROUTER_API_KEY or create experiments/.env")
+    # Model-aware key check: ``openrouter/...`` -> OPENROUTER_API_KEY,
+    # ``openai/...`` (or no prefix) -> OPENAI_API_KEY, ``anthropic/...`` ->
+    # ANTHROPIC_API_KEY. Other providers fall through to litellm's own error.
+    if args.model.startswith("openrouter/"):
+        env, prov = "OPENROUTER_API_KEY", "OpenRouter"
+    elif args.model.startswith("anthropic/"):
+        env, prov = "ANTHROPIC_API_KEY", "Anthropic"
+    else:
+        env, prov = "OPENAI_API_KEY", "OpenAI"
+    if not os.environ.get(env):
+        print(f"Set {env} (required for {prov} model {args.model!r}; "
+              "or create experiments/.env)")
         sys.exit(1)
 
     judge = SessionJudge(args.model)
