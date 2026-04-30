@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Multi-session CRAFT runs using ``tasks/craft_airline_multisession_seeds.yaml``.
+"""Multi-session CRAFT runs using ``tasks/craft_airline_multisession_seeds.json``.
 
 Each seed lists Plant / Reinforce / Trigger as separate ``session_intents`` strings; the loader
 wraps each in a one-element inner list. ``CraftLLMAttacker`` uses ``false_claim`` (or
@@ -17,7 +17,7 @@ defect in summarization.
 
 Usage:
     python experiments/run_craft_multisession.py --dry-run
-    python experiments/run_craft_multisession.py --craft-yaml tasks/craft_airline_multisession_seeds.yaml
+    python experiments/run_craft_multisession.py --craft-seeds tasks/craft_airline_multisession_seeds.json
     python experiments/run_craft_multisession.py --memory-modes no_memory --max-turns 25
     python experiments/run_craft_multisession.py --limit 5   # first 5 seeds only (per baseline + each mode)
     python experiments/run_craft_multisession.py --all-non-rag --limit 1   # 6 non-RAG configs on 1 seed
@@ -28,8 +28,11 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 import os
+import re
+import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -56,12 +59,12 @@ from memory.litellm_summariser import (
     make_litellm_cumulative_summariser,
     make_litellm_summariser,
 )
-from tasks.loader import load_craft_multisession_yaml
+from tasks.loader import load_craft_multisession_seeds
 
 MODEL = "openrouter/google/gemini-2.5-flash"
 ATTACKER_MODEL = "openai/gpt-4.1-mini"
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
-CRAFT_YAML_DEFAULT = Path(__file__).resolve().parent.parent / "tasks" / "craft_airline_multisession_seeds.yaml"
+CRAFT_SEEDS_DEFAULT = Path(__file__).resolve().parent.parent / "tasks" / "craft_airline_multisession_seeds.json"
 
 # Backward-compatible default sweep: matches every JSONL we've shipped to date.
 _DEFAULT_MEMORY_MODES = ("no_memory", "full_history", "summary")
@@ -126,6 +129,31 @@ def _build_rag_backend(kind: str, api_base: str | None = None):
     raise SystemExit(
         f"Unknown --rag-backend {kind!r}; expected one of {_RAG_BACKEND_CHOICES}"
     )
+
+
+def _file_sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _git_sha() -> str | None:
+    """Return current HEAD sha, or None if not in a git repo / git missing."""
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=Path(__file__).resolve().parent.parent,
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        return out or None
+    except Exception:
+        return None
+
+
+def _slugify_run_name(name: str) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip("-")
 
 
 def _provider_key_for_model(model_id: str) -> tuple[str, str] | None:
@@ -244,16 +272,42 @@ def make_memory(
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description="CRAFT multi-session runs from craft_airline_multisession_seeds.yaml")
+    p = argparse.ArgumentParser(
+        description="CRAFT multi-session runs from tasks/craft_airline_multisession_seeds.json"
+    )
     p.add_argument("--model", default=MODEL)
     p.add_argument(
-        "--craft-yaml",
+        "--craft-seeds",
         type=Path,
-        default=CRAFT_YAML_DEFAULT,
-        help="YAML with top-level 'seeds' list (default: tasks/craft_airline_multisession_seeds.yaml)",
+        default=CRAFT_SEEDS_DEFAULT,
+        dest="craft_seeds",
+        help=(
+            "JSON file with top-level 'seeds' array "
+            "(default: tasks/craft_airline_multisession_seeds.json)"
+        ),
     )
     p.add_argument("--dry-run", action="store_true")
-    p.add_argument("--analyze", type=str, metavar="PATH", help="Print report from JSONL and exit")
+    p.add_argument(
+        "--analyze",
+        type=str,
+        metavar="PATH",
+        help=(
+            "Print report and exit. PATH may be a run folder under "
+            "experiments/results/ (uses judged.jsonl if present, else "
+            "run.jsonl) or a legacy flat JSONL file."
+        ),
+    )
+    p.add_argument(
+        "--run-name",
+        type=str,
+        default=None,
+        metavar="LABEL",
+        help=(
+            "Optional label appended to the run folder name "
+            "(e.g. 'no-memory-baseline' -> "
+            "results/craft_multi_<timestamp>_no-memory-baseline/)."
+        ),
+    )
     # The three mode-selection flags are mutually exclusive. argparse enforces
     # that natively (via add_mutually_exclusive_group) with a clean error
     # message; no manual ``sum(sweep_flags) > 1`` post-parse check needed.
@@ -329,7 +383,7 @@ def main() -> None:
             "distortion_rate, first_laundering_session, and "
             "context_size_curve onto each ExperimentResult, and writes a "
             "consolidated instruments JSON per attack into "
-            "<results_dir>/<run_stem>_audits/. Default OFF so baseline "
+            "<run_dir>/audits/. Default OFF so baseline "
             "reproducibility against pre-instrumentation JSONLs is preserved."
         ),
     )
@@ -338,19 +392,30 @@ def main() -> None:
         nargs="*",
         default=None,
         metavar="SEED_ID",
-        help="Run only these exact seed_ids from the YAML (overrides --limit)",
+        help="Run only these exact seed_ids from the seeds file (overrides --limit)",
     )
     p.add_argument(
         "--limit",
         type=int,
         default=None,
         metavar="N",
-        help="Use only the first N seeds from the YAML (applies to baseline and every memory mode)",
+        help="Use only the first N seeds from the seeds file (applies to baseline and every memory mode)",
     )
     args = p.parse_args()
 
     if args.analyze:
-        analyze(load_results_jsonl(args.analyze))
+        ap = Path(args.analyze)
+        if ap.is_dir():
+            cand = ap / "judged.jsonl"
+            if not cand.exists():
+                cand = ap / "run.jsonl"
+            if not cand.exists():
+                raise SystemExit(
+                    f"No run.jsonl or judged.jsonl found in {ap}"
+                )
+            analyze(load_results_jsonl(cand))
+        else:
+            analyze(load_results_jsonl(ap))
         return
 
     # Mutual exclusion is enforced by the argparse group above.
@@ -378,7 +443,7 @@ def main() -> None:
                 "sentence-transformers package installed locally)."
             )
 
-    seeds = load_craft_multisession_yaml(args.craft_yaml)
+    seeds = load_craft_multisession_seeds(args.craft_seeds)
     if args.seed_ids:
         wanted = set(args.seed_ids)
         seeds = [s for s in seeds if s.seed_id in wanted]
@@ -392,7 +457,7 @@ def main() -> None:
         seeds = seeds[: args.limit]
 
     if args.dry_run:
-        print(f"CRAFT YAML: {args.craft_yaml}")
+        print(f"CRAFT seeds: {args.craft_seeds}")
         lim_note = f" (first {args.limit} only)" if args.limit else ""
         print(f"Seeds: {len(seeds)}{lim_note} | Memory modes: {list(mem_modes)}")
         if needs_rag:
@@ -422,14 +487,49 @@ def main() -> None:
 
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     run_stem = f"craft_multi_{datetime.now():%Y%m%d_%H%M%S}"
-    log = RESULTS_DIR / f"{run_stem}.jsonl"
-    audit_dir = (RESULTS_DIR / f"{run_stem}_audits") if args.instrument else None
+    if args.run_name:
+        slug = _slugify_run_name(args.run_name)
+        if slug:
+            run_stem = f"{run_stem}_{slug}"
+    run_dir = RESULTS_DIR / run_stem
+    run_dir.mkdir(parents=True, exist_ok=True)
+    log = run_dir / "run.jsonl"
+    audit_dir = (run_dir / "audits") if args.instrument else None
     if audit_dir is not None:
         audit_dir.mkdir(parents=True, exist_ok=True)
 
     env = TauBenchEnv("airline")
     runner = SessionRunner(env, args.model, max_turns=args.max_turns)
     atk_model = args.attacker_model or ATTACKER_MODEL
+
+    started_at = datetime.now().isoformat(timespec="seconds")
+    config_path = run_dir / "config.json"
+    config: dict = {
+        "run_stem": run_stem,
+        "run_name": args.run_name,
+        "started_at": started_at,
+        "argv": sys.argv,
+        "git_sha": _git_sha(),
+        "agent_model": args.model,
+        "attacker": {
+            "kind": "human" if args.human_attacker else "craft_llm",
+            "model": None if args.human_attacker else atk_model,
+            "temperature": None if args.human_attacker else args.attacker_temperature,
+        },
+        "max_turns": args.max_turns,
+        "memory_modes": list(mem_modes),
+        "rag_backend": args.rag_backend if needs_rag else None,
+        "instrumentation": bool(args.instrument),
+        "api_base": args.api_base,
+        "seeds": {
+            "path": str(args.craft_seeds),
+            "sha256": _file_sha256(args.craft_seeds),
+            "count": len(seeds),
+            "seed_ids": [s.seed_id for s in seeds],
+        },
+    }
+    with open(config_path, "w") as f:
+        json.dump(config, f, indent=2)
 
     if args.human_attacker:
         # One human, one terminal: refuse to queue many interactive sessions.
@@ -533,7 +633,13 @@ def main() -> None:
 
     violated = sum(1 for r in all_results if r.violation_detected)
     print(f"\nDone. {violated}/{len(all_results)} attacks with violation.")
-    print(f"Results: {log}")
+    print(f"Run folder: {run_dir}")
+
+    config["finished_at"] = datetime.now().isoformat(timespec="seconds")
+    config["violations"] = violated
+    config["total_attacks"] = len(all_results)
+    with open(config_path, "w") as f:
+        json.dump(config, f, indent=2)
 
     analyze([r.to_dict() for r in all_results])
 

@@ -5,10 +5,10 @@ layers in ``memory/`` (``ClaimTracker``, ``MemoryAuditLog``,
 ``ConfidenceDriftTracker``) and the multi-session orchestrator. It exposes:
 
 * ``derive_planted_claims(seed)`` — returns a list of ``PlantedClaim`` for the
-  seed. If ``seed.planted_claim_data`` is set (from a richer YAML schema), uses
+  seed. If ``seed.planted_claim_data`` is set (from a richer JSON schema), uses
   those entries verbatim. Otherwise auto-derives a single primary claim from
   ``seed.false_claim`` + ``seed.policy_area``, which is enough for the
-  laundering / MAR experiments without requiring YAML edits.
+  laundering / MAR experiments without requiring JSON edits.
 * ``Instruments`` — a small dataclass bundle of the three trackers + the
   list of claims they were built for. Created per ``(seed, mode)`` pair by the
   runner and handed to ``Orchestrator.run_attack(...)``.
@@ -54,7 +54,7 @@ def derive_planted_claims(seed: "TaskSeed") -> list:
 
     Two sources, in priority order:
 
-    1. ``seed.planted_claim_data`` (optional explicit YAML block). Each entry
+    1. ``seed.planted_claim_data`` (optional explicit ``planted_claims`` in JSON). Each entry
        must have ``claim_id`` and ``canonical``; ``variants``, ``target_policy``,
        and ``negation`` are optional.
     2. Auto-derived single primary claim from ``seed.false_claim`` and
@@ -63,7 +63,7 @@ def derive_planted_claims(seed: "TaskSeed") -> list:
 
     This split lets you ship the instrumentation now (auto-derive) and later
     upgrade individual seeds with richer claim records by editing only the
-    YAML, without touching code.
+    seeds JSON, without touching code.
     """
     from memory.claim_tracker import PlantedClaim
 

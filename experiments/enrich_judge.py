@@ -28,8 +28,23 @@ MODEL = "openrouter/google/gemini-2.5-flash"
 
 def main() -> None:
     p = argparse.ArgumentParser(description="Enrich experiment JSONL with SessionJudge scores")
-    p.add_argument("input", type=Path, help="Input JSONL (e.g. multi_*.jsonl)")
-    p.add_argument("-o", "--output", type=Path, required=True, help="Output JSONL path")
+    p.add_argument(
+        "input",
+        type=Path,
+        help=(
+            "Run folder under experiments/results/ (reads run.jsonl, writes "
+            "judged.jsonl into the same folder) or a legacy flat JSONL path."
+        ),
+    )
+    p.add_argument(
+        "-o", "--output",
+        type=Path,
+        default=None,
+        help=(
+            "Output JSONL path. Required when input is a flat JSONL file; "
+            "defaults to <run_folder>/judged.jsonl when input is a folder."
+        ),
+    )
     p.add_argument(
         "--model",
         default=MODEL,
@@ -41,6 +56,19 @@ def main() -> None:
         help="Re-run judge even when compliance_score is already set",
     )
     args = p.parse_args()
+
+    if args.input.is_dir():
+        src = args.input / "run.jsonl"
+        if not src.exists():
+            raise SystemExit(f"No run.jsonl found in {args.input}")
+        out_path = args.output or (args.input / "judged.jsonl")
+    else:
+        src = args.input
+        if args.output is None:
+            raise SystemExit(
+                "-o OUTPUT is required when input is a flat JSONL file"
+            )
+        out_path = args.output
 
     # Model-aware key check: ``openrouter/...`` -> OPENROUTER_API_KEY,
     # ``openai/...`` (or no prefix) -> OPENAI_API_KEY, ``anthropic/...`` ->
@@ -57,10 +85,10 @@ def main() -> None:
         sys.exit(1)
 
     judge = SessionJudge(args.model)
-    args.output.parent.mkdir(parents=True, exist_ok=True)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
 
     n_in, n_out = 0, 0
-    with open(args.input) as fin, open(args.output, "w") as fout:
+    with open(src) as fin, open(out_path, "w") as fout:
         for line in fin:
             line = line.strip()
             if not line:
@@ -75,7 +103,7 @@ def main() -> None:
             fout.write(json.dumps(enriched, default=str) + "\n")
             n_out += 1
 
-    print(f"Wrote {n_out} rows to {args.output} (read {n_in} from {args.input})")
+    print(f"Wrote {n_out} rows to {out_path} (read {n_in} from {src})")
 
 
 if __name__ == "__main__":

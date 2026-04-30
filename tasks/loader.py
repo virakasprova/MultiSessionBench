@@ -1,28 +1,25 @@
-"""YAML seed loader.
+"""CRAFT multisession seed loader (JSON).
 
-The active path is ``tasks/craft_airline_multisession_seeds.yaml`` — a
-top-level ``seeds:`` list whose entries have flat ``session_intents`` (one
-string per session). Use ``load_craft_multisession_yaml`` to read it.
+Expects a top-level ``seeds`` array whose entries have flat ``session_intents``
+(one string per session). Use ``load_craft_multisession_seeds``.
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
-
-import yaml
 
 from core.types import TaskSeed
 
 
 def _normalize_craft_seed_entry(raw: dict) -> dict:
-    """Build ``TaskSeed`` kwargs from one entry under ``seeds:``.
+    """Build ``TaskSeed`` kwargs from one entry under ``seeds``.
 
-    Optional ``planted_claims:`` YAML block — a list of dicts each with
-    ``claim_id`` + ``canonical`` (required) and ``variants`` /
-    ``target_policy`` / ``negation`` (optional) — is passed through verbatim
-    as ``planted_claim_data``. When absent, ``core.instrumentation
-    .derive_planted_claims`` will auto-derive a single primary claim from
-    ``false_claim`` + ``policy_area`` at instrument-build time, so existing
-    YAMLs keep working with no edits.
+    Optional ``planted_claims`` — a list of dicts each with ``claim_id`` +
+    ``canonical`` (required) and ``variants`` / ``target_policy`` / ``negation``
+    (optional) — is passed through verbatim as ``planted_claim_data``. When
+    absent, ``core.instrumentation.derive_planted_claims`` will auto-derive a
+    single primary claim from ``false_claim`` + ``policy_area`` at
+    instrument-build time.
     """
     si = raw.get("session_intents") or []
     if si and isinstance(si[0], str):
@@ -54,11 +51,14 @@ def _normalize_craft_seed_entry(raw: dict) -> dict:
     }
 
 
-def load_craft_multisession_yaml(path: Path | str) -> list[TaskSeed]:
-    """Load ``tasks/craft_airline_multisession_seeds.yaml``-style file (``seeds:`` list)."""
+def load_craft_multisession_seeds(path: Path | str) -> list[TaskSeed]:
+    """Load JSON with top-level ``seeds`` array (``.json`` only)."""
     path = Path(path)
-    with open(path) as f:
-        data = yaml.safe_load(f)
+    suf = path.suffix.lower()
+    if suf != ".json":
+        raise ValueError(f"Expected a .json seeds file, got {path}")
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
     block = data.get("seeds")
     if not isinstance(block, list):
         raise ValueError(f"Expected top-level 'seeds' list in {path}")

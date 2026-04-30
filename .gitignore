@@ -3,5 +3,6 @@ __pycache__/
 *.pyc
 .DS_Store
 experiments/.env
+# Run outputs: root-level JSONL + any subdirectory (e.g. craft_multi_YYYYMMDD_HHMMSS/)
 experiments/results/*.jsonl
-experiments/results/*_audits/
+experiments/results/*/

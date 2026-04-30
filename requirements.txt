@@ -1,3 +1,4 @@
+# Requires Python >=3.12,<3.14 (tau2 / tau2-bench)
 openai>=1.13.3
 mistralai>=0.4.0
 anthropic>=0.26.1
@@ -6,5 +7,5 @@ tenacity>=8.3.0
 termcolor>=2.4.0
 numpy>=1.26.4
 litellm>=1.41.0
-pyyaml>=6.0
-tau-bench @ git+https://github.com/sierra-research/tau-bench.git
+# tau2-bench (tau3): pin commit on branch dev/tau3 — bump when upgrading API/data
+tau2[voice,knowledge] @ git+https://github.com/sierra-research/tau2-bench.git@17e07b1da2bbc0cadfddeea36412686e0604127b

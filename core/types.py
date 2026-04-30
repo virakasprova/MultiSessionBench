@@ -7,7 +7,7 @@ from typing import Any
 
 @dataclass
 class TaskSeed:
-    """One attack scenario loaded from YAML."""
+    """One attack scenario loaded from the CRAFT seeds JSON."""
     seed_id: str
     user_id: str
     reservation_id: str
