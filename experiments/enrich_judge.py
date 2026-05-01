@@ -29,20 +29,11 @@ MODEL = "openrouter/google/gemini-2.5-flash"
 def main() -> None:
     p = argparse.ArgumentParser(description="Enrich experiment JSONL with SessionJudge scores")
     p.add_argument(
-        "input",
+        "run_dir",
         type=Path,
         help=(
-            "Run folder under experiments/results/ (reads run.jsonl, writes "
-            "judged.jsonl into the same folder) or a legacy flat JSONL path."
-        ),
-    )
-    p.add_argument(
-        "-o", "--output",
-        type=Path,
-        default=None,
-        help=(
-            "Output JSONL path. Required when input is a flat JSONL file; "
-            "defaults to <run_folder>/judged.jsonl when input is a folder."
+            "Run folder under experiments/results/ — reads run.jsonl, "
+            "writes judged.jsonl into the same folder."
         ),
     )
     p.add_argument(
@@ -55,20 +46,23 @@ def main() -> None:
         action="store_true",
         help="Re-run judge even when compliance_score is already set",
     )
+    p.add_argument(
+        "--resume",
+        action="store_true",
+        help=(
+            "If judged.jsonl already exists, append to it and skip rows "
+            "whose attack_id is already present. Use this after a crashed "
+            "judge run; without it, judged.jsonl is overwritten."
+        ),
+    )
     args = p.parse_args()
 
-    if args.input.is_dir():
-        src = args.input / "run.jsonl"
-        if not src.exists():
-            raise SystemExit(f"No run.jsonl found in {args.input}")
-        out_path = args.output or (args.input / "judged.jsonl")
-    else:
-        src = args.input
-        if args.output is None:
-            raise SystemExit(
-                "-o OUTPUT is required when input is a flat JSONL file"
-            )
-        out_path = args.output
+    if not args.run_dir.is_dir():
+        raise SystemExit(f"{args.run_dir} is not a directory")
+    src = args.run_dir / "run.jsonl"
+    if not src.exists():
+        raise SystemExit(f"No run.jsonl found in {args.run_dir}")
+    out_path = args.run_dir / "judged.jsonl"
 
     # Model-aware key check: ``openrouter/...`` -> OPENROUTER_API_KEY,
     # ``openai/...`` (or no prefix) -> OPENAI_API_KEY, ``anthropic/...`` ->
@@ -87,23 +81,72 @@ def main() -> None:
     judge = SessionJudge(args.model)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    n_in, n_out = 0, 0
-    with open(src) as fin, open(out_path, "w") as fout:
+    # Resume: pre-populate the dedup set with attack_ids already in the
+    # output and append. Without --resume the previous behavior is preserved
+    # (open in 'w' mode, dedup set empty).
+    already_judged: set[str] = set()
+    out_mode = "w"
+    if args.resume and out_path.exists():
+        with open(out_path) as f:
+            for ln in f:
+                ln = ln.strip()
+                if not ln:
+                    continue
+                try:
+                    aid = json.loads(ln).get("attack_id")
+                except json.JSONDecodeError:
+                    continue
+                if aid:
+                    already_judged.add(aid)
+        out_mode = "a"
+        print(f"[resume] {len(already_judged)} attack_ids already in {out_path}; will skip those.")
+
+    n_in, n_out, n_skipped, n_failed = 0, 0, 0, 0
+    with open(src) as fin, open(out_path, out_mode) as fout:
         for line in fin:
             line = line.strip()
             if not line:
                 continue
             n_in += 1
-            row = json.loads(line)
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError as e:
+                print(f"[skip line {n_in}: malformed JSON ({e})]")
+                n_failed += 1
+                continue
+            if row.get("attack_id") in already_judged:
+                n_skipped += 1
+                continue
             if not args.force and row.get("compliance_score") is not None:
                 fout.write(json.dumps(row, default=str) + "\n")
                 n_out += 1
                 continue
-            enriched = enrich_experiment_dict(row, judge, force=args.force)
+            try:
+                enriched = enrich_experiment_dict(row, judge, force=args.force)
+            except KeyboardInterrupt:
+                raise
+            except Exception as e:
+                # Don't drop the row — pass the un-judged input through with an
+                # error annotation so analyze() / downstream still see it, and
+                # a future --resume run can retry just the failed ones.
+                print(f"[judge failed for {row.get('attack_id')!r}: "
+                      f"{type(e).__name__}: {e}; passing through unjudged]")
+                row.setdefault("judge_errors", []).append(
+                    {"error_type": type(e).__name__, "error": str(e)}
+                )
+                fout.write(json.dumps(row, default=str) + "\n")
+                n_failed += 1
+                continue
             fout.write(json.dumps(enriched, default=str) + "\n")
             n_out += 1
 
-    print(f"Wrote {n_out} rows to {out_path} (read {n_in} from {src})")
+    summary = f"Wrote {n_out} rows to {out_path} (read {n_in} from {src}"
+    if n_skipped:
+        summary += f"; skipped {n_skipped} already-judged via --resume"
+    if n_failed:
+        summary += f"; {n_failed} rows failed and were passed through unjudged"
+    summary += ")"
+    print(summary)
 
 
 if __name__ == "__main__":

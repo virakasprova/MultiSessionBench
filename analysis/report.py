@@ -15,11 +15,9 @@ from typing import Any
 
 # Modes whose injected context contains compressed / paraphrased text in which
 # the false claim can survive without its origin (i.e. laundering can hide
-# here). Includes the legacy alias ``"summary"`` for backward-compat with
-# pre-migration JSONLs. Hybrid modes are included because they also surface
-# summary-derived text alongside verbatim/RAG content.
+# here). Hybrid modes are included because they also surface summary-derived
+# text alongside verbatim/RAG content.
 SUMMARY_MODES = frozenset({
-    "summary",
     "summary_rolling",
     "summary_cumulative",
     "hybrid_recent_summary",
@@ -27,8 +25,8 @@ SUMMARY_MODES = frozenset({
 })
 
 # Pure summary modes (no verbatim / RAG component). These are the canonical
-# arms for the "summary memory vs full history" compliance comparison.
-PURE_SUMMARY_MODES = ("summary", "summary_rolling", "summary_cumulative")
+# arms for the "summary memory vs full context" compliance comparison.
+PURE_SUMMARY_MODES = ("summary_rolling", "summary_cumulative")
 
 
 def load_results_jsonl(path: str | Path) -> list[dict]:
@@ -155,8 +153,7 @@ def _print_instrument_metrics(
     modes: list[str],
 ) -> None:
     """Per-mode rigorous metrics from the ClaimTracker / MemoryAuditLog
-    instruments. Called only when at least one row has ``mar`` populated;
-    pre-instrument JSONLs are byte-identical to the legacy report."""
+    instruments. Called only when at least one row has ``mar`` populated."""
     print(f"\n{'='*70}")
     print(" INSTRUMENT METRICS  (--instrument runs; ClaimTracker + MemoryAuditLog)")
     print(f"{'='*70}")
@@ -388,13 +385,9 @@ def analyze(results: list[dict[str, Any]]) -> None:
             print("    (heuristic only — see INSTRUMENT METRICS below for rigorous "
                   "ClaimTracker numbers)")
 
-    # ------------------------------------------------------------------
     # Instrument metrics (rigorous; populated only on --instrument runs).
     # ClaimTracker drives mar / distortion_rate; MemoryAuditLog drives
-    # first_laundering_session and context_size_curve. Pre-instrument
-    # JSONLs have all-None and the whole section is skipped silently so
-    # legacy reports are byte-identical.
-    # ------------------------------------------------------------------
+    # first_laundering_session and context_size_curve. Skipped when off.
     inst_rows = [r for r in ml if r.get("mar") is not None]
     if inst_rows:
         _print_instrument_metrics(inst_rows, modes)
@@ -450,28 +443,26 @@ def analyze(results: list[dict[str, Any]]) -> None:
         print(f"    vulnerable to single-session attacks. Multi-session delta is hard to measure.")
         print(f"    Consider testing on a stronger model for clearer signal.")
 
-    if judge_ready_ml and "full_history" in modes and "no_memory" in modes:
+    if judge_ready_ml and "full_context" in modes and "no_memory" in modes:
         def dcomp(mode: str) -> float:
             mr = [r for r in ml if r["memory_mode"] == mode]
             return sum(r["compliance_score"] for r in mr) / max(len(mr), 1)
 
-        if "full_history" in modes and "no_memory" in modes:
-            if dasr("full_history") > dasr("no_memory"):
-                print("  → Full history INCREASES vulnerability (prior transcripts trusted as context)")
+        if dasr("full_context") > dasr("no_memory"):
+            print("  → Full context INCREASES vulnerability (prior transcripts trusted as context)")
         # Compare each pure-summary arm present (rolling, cumulative, ...) against
-        # full history individually. ``summary_cumulative < full_history`` would
-        # contradict the laundering hypothesis; ``summary_cumulative > full_history``
+        # full context individually. ``summary_cumulative < full_context`` would
+        # contradict the laundering hypothesis; ``summary_cumulative > full_context``
         # would corroborate it.
-        if "full_history" in modes:
-            for sm in PURE_SUMMARY_MODES:
-                if sm not in modes:
-                    continue
-                if dcomp(sm) < dcomp("full_history"):
-                    print(f"  → {sm} memory is safer than full history "
-                          f"(summarization filters some claims)")
-                elif dcomp(sm) > dcomp("full_history"):
-                    print(f"  → {sm} memory is MORE dangerous than full history "
-                          f"(compressed claims sound authoritative)")
+        for sm in PURE_SUMMARY_MODES:
+            if sm not in modes:
+                continue
+            if dcomp(sm) < dcomp("full_context"):
+                print(f"  → {sm} memory is safer than full context "
+                      f"(summarization filters some claims)")
+            elif dcomp(sm) > dcomp("full_context"):
+                print(f"  → {sm} memory is MORE dangerous than full context "
+                      f"(compressed claims sound authoritative)")
 
     if judge_ready:
         bl_contradictions = sum(1 for r in bl if r.get("any_contradiction"))

@@ -109,11 +109,9 @@ class ExperimentResult:
     """Aggregated result of one full attack bundle.
 
     The ``mar`` / ``distortion_rate`` / ``first_laundering_session`` /
-    ``context_size_curve`` / ``audit_log_path`` fields are populated only when
-    the run is invoked with ``--instrument`` (see ``core.instrumentation``).
-    They default to ``None`` to preserve backward compatibility with all
-    pre-existing JSONLs and downstream analysis scripts that don't know about
-    them.
+    ``context_size_curve`` / ``audit_log_path`` fields are populated only
+    when the run is invoked with ``--instrument`` (see
+    ``core.instrumentation``); otherwise they remain ``None``.
     """
     attack_id: str
     memory_mode: str

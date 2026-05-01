@@ -49,9 +49,9 @@ class Orchestrator:
         A ``BaseMemoryProvider`` (e.g. anything from ``memory.make_memory_provider``).
     mode_name
         Short identifier recorded in ``ExperimentResult.memory_mode`` (e.g.
-        ``"no_memory"``, ``"full_history"``, ``"summary"``). Kept as an
-        explicit constructor arg so ``BaseMemoryProvider`` doesn't need to
-        carry display metadata.
+        ``"no_memory"``, ``"full_context"``, ``"summary_rolling"``). Kept as
+        an explicit constructor arg so ``BaseMemoryProvider`` doesn't need
+        to carry display metadata.
     user_type
         ``"adversarial"`` for attack runs (default), ``"benign"`` for control
         runs. Threaded into every ``add_session`` call so providers that do
@@ -169,8 +169,7 @@ class Orchestrator:
                 # tags planted-claim turns, calls provider.add_session, and
                 # immediately classifies each claim as PRESENT / DISTORTED /
                 # ABSENT against the post-add provider snapshot. When no
-                # tracker is wired, this is a plain provider call (unchanged
-                # from the legacy path).
+                # tracker is wired, this is a plain provider call.
                 if instruments is not None:
                     instruments.tracker.add_session(
                         turns,
@@ -231,8 +230,16 @@ class Orchestrator:
                     instruments.audit_log.first_laundering_session(primary)
                 )
             if audit_path is not None:
-                _save_instruments_json(instruments, audit_path, attack_id, self.mode_name)
-                result.audit_log_path = str(audit_path)
+                # An audit-write failure should not lose the actual attack
+                # result. The attack itself ran to completion; failing to
+                # serialise the qualitative instruments JSON is a logging
+                # issue, not a correctness one. Skip and surface the error.
+                try:
+                    _save_instruments_json(instruments, audit_path, attack_id, self.mode_name)
+                    result.audit_log_path = str(audit_path)
+                except Exception as e:
+                    print(f"      [audit save failed: {type(e).__name__}: {e}; "
+                          f"result returned without audit_log_path]")
 
         return result
 
@@ -303,9 +310,9 @@ def messages_to_turns(messages: list[dict[str, Any]]) -> list[Turn]:
     short ``[tool_call: name(args)]`` marker, and the corresponding tool
     output becomes a ``Turn(role="tool", tool_name=..., content=<output>)``.
 
-    This means downstream providers (e.g. ``RollingSummaryProvider``,
-    ``FullContextProvider``) see the same agent-loop detail the legacy
-    transcript-based providers used to see.
+    Downstream providers (e.g. ``RollingSummaryProvider``,
+    ``FullContextProvider``) see full agent-loop detail (tool calls and
+    tool outputs as separate ``Turn``s).
     """
     turns: list[Turn] = []
     for m in messages:

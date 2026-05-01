@@ -27,26 +27,66 @@ export OPENROUTER_API_KEY=your_key_here   # matches script defaults
 
 ## How to run
 
+Smoke-test the run plan without any API calls:
+
 ```bash
-# Plan only, no API calls
 python experiments/run_craft_multisession.py --dry-run --limit 1
-
-# Default sweep (no_memory, full_history, summary)
-python experiments/run_craft_multisession.py --limit 1
-
-# All six non-RAG modes on one seed (no embedding API needed)
-python experiments/run_craft_multisession.py --all-non-rag --limit 1
-
-# Tag the run folder
-python experiments/run_craft_multisession.py --memory-modes no_memory --run-name no-mem-baseline
 ```
 
-RAG modes need embeddings — default `--rag-backend openai` reuses
+**Pick a scope.** Default sweep is `no_memory, full_context, summary_rolling`:
+
+```bash
+python experiments/run_craft_multisession.py --limit 1                            # default 3 modes
+python experiments/run_craft_multisession.py --memory-modes summary_cumulative    # one mode
+python experiments/run_craft_multisession.py --all-non-rag --limit 1              # 6 non-RAG modes
+python experiments/run_craft_multisession.py --all-modes  --limit 1               # all 10 incl. RAG
+```
+
+**Common add-ons:**
+
+```bash
+# Rigorous claim/audit metrics — per-attack JSONs in <run_dir>/audits/
+python experiments/run_craft_multisession.py --all-modes --limit 5 --instrument
+
+# Tag the folder name → craft_multi_<timestamp>_no-mem-baseline/
+python experiments/run_craft_multisession.py --memory-modes no_memory --run-name no-mem-baseline
+
+# Resume a crashed run (skips already-completed (attack_id, memory_mode) pairs)
+python experiments/run_craft_multisession.py --resume experiments/results/craft_multi_<timestamp>/
+```
+
+**RAG modes** need embeddings — default `--rag-backend openai` reuses
 `OPENROUTER_API_KEY` / `OPENAI_API_KEY`, or install `sentence-transformers`
 and pass `--rag-backend sentence_transformers`.
 
-All flags (`--all-modes`, `--instrument`, `--craft-seeds PATH`, OpenAI-direct
-models, etc.): `python experiments/run_craft_multisession.py --help`.
+**Open-source / local models** — point `--api-base` at any OpenAI-compatible
+local server, or use the `ollama_chat/` prefix for Ollama:
+
+```bash
+# Ollama (default localhost:11434)
+python experiments/run_craft_multisession.py --limit 1 \
+    --model ollama_chat/llama3.1 \
+    --attacker-model ollama_chat/llama3.1
+
+# vLLM / LM Studio / llama.cpp (OpenAI-compatible)
+python experiments/run_craft_multisession.py --limit 1 \
+    --model openai/meta-llama/Llama-3.1-8B-Instruct \
+    --attacker-model openai/meta-llama/Llama-3.1-8B-Instruct \
+    --api-base http://localhost:8000/v1
+
+# Local agent + cloud attacker (or vice versa)
+python experiments/run_craft_multisession.py --limit 1 \
+    --model ollama_chat/llama3.1 \
+    --attacker-model openai/gpt-4.1-mini
+
+# RAG modes with a local embedding model
+python experiments/run_craft_multisession.py --limit 1 --all-modes \
+    --model ollama_chat/llama3.1 \
+    --rag-backend sentence_transformers
+```
+
+Other flags (`--seed-ids`, `--craft-seeds PATH`, `--max-turns`, `--human-attacker`,
+OpenAI-direct models): `python experiments/run_craft_multisession.py --help`.
 
 ### Where results go
 
@@ -70,8 +110,6 @@ python experiments/enrich_judge.py "$RUN"
 python experiments/run_craft_multisession.py --analyze "$RUN"
 # or: python analysis/summarize_run.py "$RUN"
 ```
-
-Legacy flat `.jsonl` paths still work for `enrich_judge.py -o OUT.jsonl` and `--analyze PATH.jsonl`.
 
 ## Layout
 

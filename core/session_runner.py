@@ -34,11 +34,13 @@ class SessionRunner:
         model: str,
         max_turns: int = 15,
         seed: int = 42,
+        api_base: str | None = None,
     ):
         self.env = env
         self.model = model
         self.max_turns = max_turns
         self.seed = seed
+        self.api_base = api_base
 
     def run(
         self,
@@ -49,7 +51,19 @@ class SessionRunner:
         session_index: int = 0,
         is_baseline: bool = False,
     ) -> SessionResult:
-        first = attacker.start_session(context, is_baseline=is_baseline)
+        # Attacker LLM failure on the opening message: return an empty session
+        # result rather than killing the whole attack. Symmetric to the
+        # agent-side LLM error handling below — a transient OpenAI / OpenRouter
+        # blip on the customer side shouldn't lose the rest of the run.
+        try:
+            first = attacker.start_session(context, is_baseline=is_baseline)
+        except Exception as e:
+            print(f"      [attacker error in start_session: {type(e).__name__}: {e}; "
+                  f"returning empty session]")
+            return _empty_session_result(
+                session_index,
+                f"[attacker failed before opening message: {type(e).__name__}: {e}]",
+            )
         msgs: list[dict[str, Any]] = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": first},
@@ -71,6 +85,7 @@ class SessionRunner:
                     temperature=0.0,
                     seed=self.seed,
                     log_prefix="      ",
+                    **({"api_base": self.api_base} if self.api_base else {}),
                 )
             except Exception as e:
                 print(f"      [LLM error: {e}]")
@@ -114,11 +129,16 @@ class SessionRunner:
             else:
                 msgs.append(nm)
 
-                nxt = attacker.next_user_message(
-                    context,
-                    _dialogue_without_system(msgs),
-                    is_baseline=is_baseline,
-                )
+                try:
+                    nxt = attacker.next_user_message(
+                        context,
+                        _dialogue_without_system(msgs),
+                        is_baseline=is_baseline,
+                    )
+                except Exception as e:
+                    print(f"      [attacker error in next_user_message: "
+                          f"{type(e).__name__}: {e}; ending session]")
+                    break
                 if nxt is None:
                     break
                 msgs.append({"role": "user", "content": nxt})
@@ -197,6 +217,29 @@ def _clip(s: str, max_len: int) -> str:
     if len(s) <= max_len:
         return s
     return s[: max_len - 20] + "\n… [truncated]"
+
+
+def _empty_session_result(session_index: int, transcript: str) -> SessionResult:
+    """Return a well-formed but empty SessionResult for catastrophic-attacker cases.
+
+    Used when ``attacker.start_session`` raises before any messages exist —
+    rather than letting the exception kill the whole attack, we return a
+    placeholder result so the orchestrator can record the failure (cost=0,
+    no tools, marked transcript) and continue with the next session.
+    """
+    mechanical = SessionMechanicalResult(
+        session_index=session_index,
+        violation=False,
+        verified=False,
+        verified_then_acted=False,
+        transferred_to_human=False,
+        tools_called=[],
+        writes=[],
+        cost=0.0,
+        transcript=transcript,
+        messages=[],
+    )
+    return SessionResult(mechanical=mechanical, judge=None, contradicted=None, compliance=None)
 
 
 def _format_transcript(msgs: list[dict]) -> str:
