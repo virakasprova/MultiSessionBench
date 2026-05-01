@@ -6,6 +6,7 @@ Subjective scoring (refused / accepted / confirmed / compliance) is done post-ho
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from attackers.base import AttackerAgent
@@ -25,6 +26,24 @@ from core.environment import TauBenchEnv
 
 def _dialogue_without_system(msgs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [m for m in msgs if m.get("role") != "system"]
+
+
+def _matches_violation_tool(fn: str, violation_tool: str) -> bool:
+    """Match a tool call against a seed's ``violation_tool`` spec.
+
+    Supports a regex form for domains (banking) whose tool names carry a
+    randomized suffix per data version: ``"re:close_credit_card_account_\\w+"``.
+    Plain strings remain exact-match for airline / retail backwards-compat.
+    Empty / falsy spec never matches.
+    """
+    if not violation_tool:
+        return False
+    if violation_tool.startswith("re:"):
+        try:
+            return bool(re.fullmatch(violation_tool[3:], fn))
+        except re.error:
+            return False
+    return fn == violation_tool
 
 
 class SessionRunner:
@@ -49,20 +68,21 @@ class SessionRunner:
         system_prompt: str,
         violation_tool: str,
         session_index: int = 0,
-        is_baseline: bool = False,
+        max_turns_override: int | None = None,
     ) -> SessionResult:
         # Attacker LLM failure on the opening message: return an empty session
         # result rather than killing the whole attack. Symmetric to the
         # agent-side LLM error handling below — a transient OpenAI / OpenRouter
         # blip on the customer side shouldn't lose the rest of the run.
         try:
-            first = attacker.start_session(context, is_baseline=is_baseline)
+            first = attacker.start_session(context)
         except Exception as e:
             print(f"      [attacker error in start_session: {type(e).__name__}: {e}; "
                   f"returning empty session]")
             return _empty_session_result(
                 session_index,
                 f"[attacker failed before opening message: {type(e).__name__}: {e}]",
+                terminated_by="attacker_error",
             )
         msgs: list[dict[str, Any]] = [
             {"role": "system", "content": system_prompt},
@@ -75,8 +95,12 @@ class SessionRunner:
         verified_then_acted = False
         transferred_to_human = False
         violation = False
+        # Default assumes we exhaust the loop without any stop signal; every
+        # other termination path overwrites this before the break.
+        terminated_by = "max_turns"
 
-        for _ in range(self.max_turns):
+        effective_max_turns = max_turns_override if max_turns_override else self.max_turns
+        for _ in range(effective_max_turns):
             try:
                 res = completion_with_retry(
                     messages=msgs,
@@ -89,6 +113,7 @@ class SessionRunner:
                 )
             except Exception as e:
                 print(f"      [LLM error: {e}]")
+                terminated_by = "agent_error"
                 break
 
             nm = res.choices[0].message.model_dump()
@@ -113,7 +138,7 @@ class SessionRunner:
                 tr = self.env.exec_tool(fn, fa)
                 if self.env.is_write_tool(fn):
                     writes.append({"name": fn, "args": fa})
-                if fn == violation_tool:
+                if _matches_violation_tool(fn, violation_tool):
                     violation = True
                 if fn == "transfer_to_human_agents":
                     transferred_to_human = True
@@ -125,6 +150,7 @@ class SessionRunner:
                 ])
 
                 if fn == "transfer_to_human_agents":
+                    terminated_by = "transfer"
                     break
             else:
                 msgs.append(nm)
@@ -133,13 +159,14 @@ class SessionRunner:
                     nxt = attacker.next_user_message(
                         context,
                         _dialogue_without_system(msgs),
-                        is_baseline=is_baseline,
                     )
                 except Exception as e:
                     print(f"      [attacker error in next_user_message: "
                           f"{type(e).__name__}: {e}; ending session]")
+                    terminated_by = "attacker_error"
                     break
                 if nxt is None:
+                    terminated_by = "attacker_stop"
                     break
                 msgs.append({"role": "user", "content": nxt})
 
@@ -154,6 +181,7 @@ class SessionRunner:
             cost=cost,
             transcript=_format_transcript(msgs),
             messages=_preserve_messages(msgs),
+            terminated_by=terminated_by,
         )
         return SessionResult(mechanical=mechanical, judge=None, contradicted=None, compliance=None)
 
@@ -219,7 +247,12 @@ def _clip(s: str, max_len: int) -> str:
     return s[: max_len - 20] + "\n… [truncated]"
 
 
-def _empty_session_result(session_index: int, transcript: str) -> SessionResult:
+def _empty_session_result(
+    session_index: int,
+    transcript: str,
+    *,
+    terminated_by: str = "unknown",
+) -> SessionResult:
     """Return a well-formed but empty SessionResult for catastrophic-attacker cases.
 
     Used when ``attacker.start_session`` raises before any messages exist —
@@ -238,6 +271,7 @@ def _empty_session_result(session_index: int, transcript: str) -> SessionResult:
         cost=0.0,
         transcript=transcript,
         messages=[],
+        terminated_by=terminated_by,
     )
     return SessionResult(mechanical=mechanical, judge=None, contradicted=None, compliance=None)
 

@@ -1,33 +1,20 @@
 #!/usr/bin/env python3
-"""Multi-session CRAFT runs using ``tasks/craft_airline_multisession_seeds.json``.
+"""MultiSessionBench v4.1 runner.
 
-Each seed lists Plant / Reinforce / Trigger as separate ``session_intents`` strings; the loader
-wraps each in a one-element inner list. ``CraftLLMAttacker`` uses ``false_claim`` (or
-``hidden_attacker_goal``) as the hidden goal and one phase's text per orchestrator session.
-
-**Baselines (two kinds):** (1) *Full-blob* — all phases merged into one chat (can be harder than
-multi-session). (2) *Trigger-only* — only the Trigger phase in one session; isolates the
-multi-session + memory effect from turn-count / priming confounds. Compare: trigger-only baseline
-vs session 3 under ``no_memory`` vs ``full_history`` / ``summary``.
-
-Summary memory: do **not** treat ASR under ``summary`` as a laundering or faithfulness bug — the
-compressor reflects what actually happened (including tool outcomes that contradict the false
-claim). Lower attack success under summary is a substantive finding about persistence, not a
-defect in summarization.
+Reads v4.1 seeds (each is a tau2-Task pair: ``adversarial_task`` + ``benign_task``,
+with three ``session_intents`` for plant / reinforce / trigger) and runs one
+attack per (seed, memory_mode).
 
 Usage:
     python experiments/run_craft_multisession.py --dry-run
-    python experiments/run_craft_multisession.py --craft-seeds tasks/craft_airline_multisession_seeds.json
-    python experiments/run_craft_multisession.py --memory-modes no_memory --max-turns 25
-    python experiments/run_craft_multisession.py --limit 5   # first 5 seeds only (per baseline + each mode)
-    python experiments/run_craft_multisession.py --all-non-rag --limit 1   # 6 non-RAG configs on 1 seed
-    python experiments/run_craft_multisession.py --all-modes --limit 1     # all 10 configs (incl. RAG)
+    python experiments/run_craft_multisession.py --memory-modes no_memory
+    python experiments/run_craft_multisession.py --all-non-rag --limit 1
+    python experiments/run_craft_multisession.py --all-modes --limit 1
     python experiments/run_craft_multisession.py --memory-modes rag_baseline rag_shared --rag-backend openai
 """
 from __future__ import annotations
 
 import argparse
-import copy
 import hashlib
 import json
 import os
@@ -69,12 +56,16 @@ from memory.litellm_summariser import (
     make_litellm_cumulative_summariser,
     make_litellm_summariser,
 )
-from tasks.loader import load_craft_multisession_seeds
+from tasks.loader import (
+    SeedValidationError,
+    load_craft_multisession_seeds,
+    validate_seed_against_env,
+)
 
 MODEL = "openrouter/google/gemini-2.5-flash"
-ATTACKER_MODEL = "openai/gpt-4.1-mini"
+ATTACKER_MODEL = "openrouter/openai/gpt-4.1-mini"
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
-CRAFT_SEEDS_DEFAULT = Path(__file__).resolve().parent.parent / "tasks" / "craft_airline_multisession_seeds.json"
+CRAFT_SEEDS_DEFAULT = Path(__file__).resolve().parent.parent / "tasks" / "multisessionbench_v4_1_with_attack_session_intents.json"
 
 _DEFAULT_MEMORY_MODES = ("no_memory", "full_context", "summary_rolling")
 
@@ -194,7 +185,6 @@ def _record_skip(
     *,
     attack_id: str,
     memory_mode: str,
-    is_baseline: bool,
     error: str,
     error_type: str,
     tb: str,
@@ -204,7 +194,6 @@ def _record_skip(
         "skipped": True,
         "attack_id": attack_id,
         "memory_mode": memory_mode,
-        "is_baseline": is_baseline,
         "error_type": error_type,
         "error": error,
         "traceback": tb,
@@ -360,6 +349,43 @@ def make_memory(
     return _MEMORY_DISPATCH[mode](summary_model, rag_backend)
 
 
+def _validate_seeds(seeds: list, *, verbose: bool) -> list[str]:
+    """Resolve every seed against its tau2 env. Returns the list of failures.
+
+    Builds one ``TauBenchEnv`` per domain present in ``seeds`` (env construction
+    is the slow part — DB load + toolkit schema build), then runs
+    ``validate_seed_against_env`` on each seed. Failures are aggregated rather
+    than raised on first error so a malformed seeds file shows the full punch
+    list in one pass.
+    """
+    by_domain: dict[str, list] = {}
+    for s in seeds:
+        by_domain.setdefault(s.domain, []).append(s)
+
+    failures: list[str] = []
+    for domain, group in by_domain.items():
+        try:
+            env = TauBenchEnv(domain)
+        except Exception as e:
+            for s in group:
+                failures.append(
+                    f"{s.seed_id}: domain {domain!r} unsupported "
+                    f"({type(e).__name__}: {e})"
+                )
+            continue
+        for s in group:
+            try:
+                validate_seed_against_env(s, env)
+                if verbose:
+                    print(f"  [ok] {s.seed_id} [{domain}]")
+            except SeedValidationError as e:
+                msg = str(e)
+                failures.append(msg)
+                if verbose:
+                    print(f"  [FAIL] {msg}")
+    return failures
+
+
 def main() -> None:
     p = argparse.ArgumentParser(
         description="CRAFT multi-session runs from tasks/craft_airline_multisession_seeds.json"
@@ -467,11 +493,9 @@ def main() -> None:
         help=(
             "Drive the customer side from stdin instead of CraftLLMAttacker. "
             "Useful for manual probing of one (seed, memory_mode) pair. "
-            "Skips the auto full-blob and trigger-only baselines (you don't "
-            "want to manually replay the same arc three times). Pair with "
-            "--seed-ids and a single --memory-modes value; sweeps with many "
-            "(seed, mode) combinations are rejected since each combination "
-            "queues another interactive session on the same terminal."
+            "Pair with --seed-ids and a single --memory-modes value; sweeps "
+            "with many (seed, mode) combinations are rejected since each "
+            "combination queues another interactive session on the same terminal."
         ),
     )
     p.add_argument(
@@ -482,9 +506,7 @@ def main() -> None:
             "ConfidenceDriftTracker instrumentation. Surfaces mar, "
             "distortion_rate, first_laundering_session, and "
             "context_size_curve onto each ExperimentResult, and writes a "
-            "consolidated instruments JSON per attack into "
-            "<run_dir>/audits/. Default OFF so baseline "
-            "reproducibility against pre-instrumentation JSONLs is preserved."
+            "consolidated instruments JSON per attack into <run_dir>/audits/."
         ),
     )
     p.add_argument(
@@ -499,7 +521,25 @@ def main() -> None:
         type=int,
         default=None,
         metavar="N",
-        help="Use only the first N seeds from the seeds file (applies to baseline and every memory mode)",
+        help="Use only the first N seeds from the seeds file (applies to every memory mode)",
+    )
+    p.add_argument(
+        "--validate-seeds-only",
+        action="store_true",
+        help=(
+            "Resolve every seed's user / resource ids against the live tau2 "
+            "env and exit with a pass/fail report. No LLM calls, no run "
+            "folder. Useful before kicking off a real sweep."
+        ),
+    )
+    p.add_argument(
+        "--skip-seed-validation",
+        action="store_true",
+        help=(
+            "Skip the pre-flight seed validation that runs at the start of "
+            "every regular sweep. Off by default — only set when you know "
+            "the seeds file has fictional ids and you're debugging."
+        ),
     )
     args = p.parse_args()
 
@@ -554,6 +594,15 @@ def main() -> None:
             raise SystemExit("--limit must be at least 1")
         seeds = seeds[: args.limit]
 
+    if args.validate_seeds_only:
+        print(f"Validating {len(seeds)} seed(s) against live tau2 envs…\n")
+        failures = _validate_seeds(seeds, verbose=True)
+        if failures:
+            print(f"\n{len(failures)} seed(s) failed validation.")
+            sys.exit(1)
+        print(f"\nAll {len(seeds)} seeds passed.")
+        return
+
     if args.dry_run:
         print(f"CRAFT seeds: {args.craft_seeds}")
         lim_note = f" (first {args.limit} only)" if args.limit else ""
@@ -566,15 +615,15 @@ def main() -> None:
             print("Instrumentation: ON (claim tracker + audit log + drift tracker)")
         for s in seeds:
             print(
-                f"  {s.seed_id}: user={s.user_id!r} res={s.reservation_id} "
+                f"  {s.seed_id} [{s.domain}]: user={s.user_id!r} res={s.reservation_id} "
                 f"vtool={s.violation_tool} orchestrator_sessions={s.num_sessions()}"
             )
+        from collections import Counter as _C
+        domain_counts = _C(s.domain for s in seeds)
+        print(f"  domain breakdown: {dict(domain_counts)}")
         n = len(seeds)
-        total = n * (2 + len(mem_modes))
-        print(
-            f"\nTotal: {n} seeds × (2 baselines: full-blob + trigger-only + {len(mem_modes)} multi-session modes) "
-            f"= {total} runs"
-        )
+        total = n * len(mem_modes)
+        print(f"\nTotal: {n} seeds × {len(mem_modes)} memory modes = {total} runs")
         return
 
     # Gate is model-aware: only require the env var matching the litellm
@@ -582,6 +631,19 @@ def main() -> None:
     # ``--model openai/gpt-4o-mini`` runs against ``OPENAI_API_KEY``
     # alone). Attacker model resolves to ATTACKER_MODEL when not passed.
     _check_provider_keys(args.model, args.attacker_model or ATTACKER_MODEL, api_base=args.api_base)
+
+    # Pre-flight: refuse to spend LLM budget on seeds whose ids don't resolve
+    # in the env. Cheap (no LLM calls; only env construction + a few read
+    # tools). Use --skip-seed-validation to bypass while iterating on a
+    # malformed seeds file.
+    if not args.skip_seed_validation:
+        failures = _validate_seeds(seeds, verbose=False)
+        if failures:
+            print(f"Seed validation failed for {len(failures)} seed(s):")
+            for f in failures:
+                print(f"  - {f}")
+            print("\nFix the seeds file or rerun with --skip-seed-validation.")
+            sys.exit(1)
 
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     if args.resume:
@@ -609,8 +671,13 @@ def main() -> None:
     if args.resume:
         print(f"[resume] {run_dir}: {len(done_keys)} (attack_id, memory_mode) pairs already recorded; will skip those.")
 
-    env = TauBenchEnv("airline")
-    runner = SessionRunner(env, args.model, max_turns=args.max_turns, api_base=args.api_base)
+    # Env is built per-domain inside the run loop below — different domains
+    # need different tau2 environments, DBs, and tool surfaces. Group seeds
+    # by domain here so the env construction cost (load DB, build toolkit
+    # schemas) is paid once per group, not per seed.
+    seeds_by_domain: dict[str, list] = {}
+    for s in seeds:
+        seeds_by_domain.setdefault(s.domain, []).append(s)
     atk_model = args.attacker_model or ATTACKER_MODEL
 
     started_at = datetime.now().isoformat(timespec="seconds")
@@ -680,7 +747,7 @@ def main() -> None:
 
     print(f"Agent model: {args.model}")
     if args.human_attacker:
-        print("Attacker: HumanAttacker (you drive; baselines skipped)")
+        print("Attacker: HumanAttacker (you drive)")
     else:
         print(f"Attacker: {atk_model} (CraftLLMAttacker, temp={args.attacker_temperature})")
     print(f"max_turns: {args.max_turns}")
@@ -696,7 +763,7 @@ def main() -> None:
 
     rag_backend = _build_rag_backend(args.rag_backend, api_base=args.api_base) if needs_rag else None
 
-    def _run_one(orch_obj: Orchestrator, the_seed, *, is_baseline: bool):
+    def _run_one(orch_obj: Orchestrator, the_seed):
         """Build per-attack instruments (if enabled) and dispatch to orchestrator.
 
         Each (seed, mode) attack gets its own ClaimTracker / MemoryAuditLog /
@@ -709,7 +776,7 @@ def main() -> None:
         for that seed is preferable to losing the attack record entirely.
         """
         if not args.instrument:
-            return orch_obj.run_attack(the_seed, is_baseline=is_baseline)
+            return orch_obj.run_attack(the_seed)
         assert audit_dir is not None  # invariant: instrument => audit_dir set
         try:
             claims = derive_planted_claims(the_seed)
@@ -717,35 +784,23 @@ def main() -> None:
         except Exception as e:
             print(f"      [instrument build failed: {type(e).__name__}: {e}; "
                   f"running attack without instruments]")
-            return orch_obj.run_attack(the_seed, is_baseline=is_baseline)
-        attack_id_local = the_seed.seed_id + ("_baseline" if is_baseline else "")
-        path = audit_dir / f"audit_{attack_id_local}__{orch_obj.mode_name}.json"
-        return orch_obj.run_attack(
-            the_seed,
-            is_baseline=is_baseline,
-            instruments=instruments,
-            audit_path=path,
-        )
+            return orch_obj.run_attack(the_seed)
+        path = audit_dir / f"audit_{the_seed.seed_id}__{orch_obj.mode_name}.json"
+        return orch_obj.run_attack(the_seed, instruments=instruments, audit_path=path)
 
-    def _attempt(
-        orch_obj: Orchestrator,
-        the_seed,
-        *,
-        is_baseline: bool,
-        label_attack_id: str,
-    ) -> None:
+    def _attempt(orch_obj: Orchestrator, the_seed) -> None:
         """Run one (seed, mode) attack with skip-on-error + resume dedup.
 
         On unhandled exception, write a record to ``skipped.jsonl`` and continue
         the sweep. On resume, dedup by ``(attack_id, memory_mode)`` against
         already-recorded rows in run.jsonl + skipped.jsonl.
         """
-        key = (label_attack_id, orch_obj.mode_name)
+        key = (the_seed.seed_id, orch_obj.mode_name)
         if key in done_keys:
             print(f"[skip — already recorded]")
             return
         try:
-            r = _run_one(orch_obj, the_seed, is_baseline=is_baseline)
+            r = _run_one(orch_obj, the_seed)
         except KeyboardInterrupt:
             raise
         except Exception as e:
@@ -753,9 +808,8 @@ def main() -> None:
             print(f"[FAILED: {type(e).__name__}: {e}]")
             _record_skip(
                 skip_log,
-                attack_id=label_attack_id,
+                attack_id=the_seed.seed_id,
                 memory_mode=orch_obj.mode_name,
-                is_baseline=is_baseline,
                 error=str(e),
                 error_type=type(e).__name__,
                 tb=tb,
@@ -769,38 +823,27 @@ def main() -> None:
 
     final_status = "failed"
     try:
-        # Skip auto-baselines for human-driven runs: replaying the full arc plus
-        # trigger-only as separate single sessions interactively is tedious and
-        # not the point of dropping into the REPL. Multi-session run still fires
-        # so memory accumulation across phases is exercised.
-        if not args.human_attacker:
-            baseline_memory = make_memory("no_memory", args.model)
-            baseline_orch = Orchestrator(
-                env, runner, baseline_memory, attacker, mode_name="no_memory"
+        # Outer loop: build one TauBenchEnv per domain present in the seed
+        # set. The orchestrator and the SessionRunner both bind to a specific
+        # env, so we rebuild them each time the domain changes; the attacker
+        # and rag_backend are reusable.
+        for domain, domain_seeds in seeds_by_domain.items():
+            print(f"\n=== domain: {domain} ({len(domain_seeds)} seed(s)) ===")
+            try:
+                env = TauBenchEnv(domain)
+            except Exception as e:
+                print(f"  [domain {domain!r} unsupported: {type(e).__name__}: {e}; skipping]")
+                continue
+            runner = SessionRunner(
+                env, args.model, max_turns=args.max_turns, api_base=args.api_base
             )
-
-            print("-- Baselines (single-session, all phases merged in one roleplay blob) --")
-            for seed in seeds:
-                aid = f"{seed.seed_id}_baseline"
-                print(f"  {aid}:", end=" ")
-                _attempt(baseline_orch, seed, is_baseline=True, label_attack_id=aid)
-
-            print("\n-- Trigger-only baselines (single session, Trigger phase only — no plant/reinforce) --")
-            for seed in seeds:
-                trigger_only = copy.deepcopy(seed)
-                trigger_only.seed_id = f"{seed.seed_id}_trigger_only"
-                trigger_only.session_intents = [seed.session_intents[-1]]
-                aid = f"{trigger_only.seed_id}_baseline"
-                print(f"  {aid}:", end=" ")
-                _attempt(baseline_orch, trigger_only, is_baseline=True, label_attack_id=aid)
-
-        for mode in mem_modes:
-            memory = make_memory(mode, args.model, rag_backend=rag_backend)
-            orch = Orchestrator(env, runner, memory, attacker, mode_name=mode)
-            print(f"\n-- Multi-session [{mode}] (Plant → Reinforce → Trigger) --")
-            for seed in seeds:
-                print(f"  {seed.seed_id} [{mode}]:", end=" ")
-                _attempt(orch, seed, is_baseline=False, label_attack_id=seed.seed_id)
+            for mode in mem_modes:
+                memory = make_memory(mode, args.model, rag_backend=rag_backend)
+                orch = Orchestrator(env, runner, memory, attacker, mode_name=mode)
+                print(f"\n-- [{mode}] (Plant → Reinforce → Trigger) --")
+                for seed in domain_seeds:
+                    print(f"  {seed.seed_id} [{mode}]:", end=" ")
+                    _attempt(orch, seed)
         final_status = "completed"
     except KeyboardInterrupt:
         final_status = "interrupted"

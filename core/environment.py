@@ -1,7 +1,8 @@
-"""TauBenchEnv — τ²-bench (Python package ``tau2``, tau3 line) wrapper for airline or retail.
+"""TauBenchEnv — τ²-bench wrapper for airline / retail / banking_knowledge.
 
-Domain JSON and policies load from ``$TAU2_DATA_DIR/tau2/domains/<domain>/`` or from the
-tau2 source tree when installed editable. See tau2-bench README for ``TAU2_DATA_DIR``.
+Domain JSON and policies load from ``$TAU2_DATA_DIR/tau2/domains/<domain>/`` or
+from the tau2 source tree when installed editable. See tau2-bench README for
+``TAU2_DATA_DIR``.
 """
 from __future__ import annotations
 
@@ -10,7 +11,7 @@ from typing import Literal
 from tau2.environment.environment import Environment
 from tau2.environment.toolkit import ToolType
 
-Domain = Literal["airline", "retail"]
+Domain = Literal["airline", "retail", "banking_knowledge"]
 
 # Hardcoded write-tool sets are kept only as a drift tripwire: at startup we
 # assert they equal the set tau2 derives from ``ToolType.WRITE`` decorators.
@@ -35,6 +36,10 @@ RETAIL_WRITE_TOOLS = frozenset({
 
 AIRLINE_VERIFICATION_TOOLS = frozenset({"get_user_details", "get_reservation_details"})
 RETAIL_VERIFICATION_TOOLS = frozenset({"get_user_details", "get_order_details"})
+# banking_knowledge has no fixed verification surface — names are randomized
+# with numeric suffixes per data version, and the seeds describe verification
+# in nl_assertions rather than tool gating.
+BANKING_VERIFICATION_TOOLS: frozenset[str] = frozenset()
 
 
 class TauBenchEnv:
@@ -49,7 +54,7 @@ class TauBenchEnv:
             self._db_path = AIRLINE_DB_PATH
             self._db_cls = FlightDB
             self._verification_tools = AIRLINE_VERIFICATION_TOOLS
-            self._expected_write_tools = AIRLINE_WRITE_TOOLS
+            self._expected_write_tools: frozenset[str] | None = AIRLINE_WRITE_TOOLS
         elif domain == "retail":
             from tau2.domains.retail.data_model import RetailDB
             from tau2.domains.retail.environment import get_environment
@@ -60,8 +65,23 @@ class TauBenchEnv:
             self._db_cls = RetailDB
             self._verification_tools = RETAIL_VERIFICATION_TOOLS
             self._expected_write_tools = RETAIL_WRITE_TOOLS
+        elif domain == "banking_knowledge":
+            from tau2.domains.banking_knowledge.data_model import TransactionalDB
+            from tau2.domains.banking_knowledge.environment import get_environment
+            from tau2.domains.banking_knowledge.utils import KNOWLEDGE_DB_PATH
+
+            self._build_env = get_environment
+            self._db_path = KNOWLEDGE_DB_PATH
+            self._db_cls = TransactionalDB
+            self._verification_tools = BANKING_VERIFICATION_TOOLS
+            # banking has 34 write tools with randomized numeric suffixes —
+            # skip the drift assertion here and trust the live derivation.
+            self._expected_write_tools = None
         else:
-            raise ValueError(f"unknown domain: {domain!r}, expected 'airline' or 'retail'")
+            raise ValueError(
+                f"unknown domain: {domain!r}, "
+                "expected 'airline' / 'retail' / 'banking_knowledge'"
+            )
 
         self._env: Environment | None = None
         self.reset()
@@ -74,14 +94,15 @@ class TauBenchEnv:
         self._wiki_cache: str = self._env.policy
         self._tools_info_cache: list[dict] = [t.openai_schema for t in self._env.get_tools()]
 
-        derived_writes = frozenset(
-            name for name in self._env.tools.tools
-            if self._env.tools.tool_type(name) == ToolType.WRITE
-        )
-        assert derived_writes == self._expected_write_tools, (
-            f"tau2 write-tool drift on {domain}: derived={sorted(derived_writes)} "
-            f"vs expected={sorted(self._expected_write_tools)}"
-        )
+        if self._expected_write_tools is not None:
+            derived_writes = frozenset(
+                name for name in self._env.tools.tools
+                if self._env.tools.tool_type(name) == ToolType.WRITE
+            )
+            assert derived_writes == self._expected_write_tools, (
+                f"tau2 write-tool drift on {domain}: derived={sorted(derived_writes)} "
+                f"vs expected={sorted(self._expected_write_tools)}"
+            )
 
     @property
     def verification_tools(self) -> frozenset[str]:
@@ -89,7 +110,11 @@ class TauBenchEnv:
 
     def reset(self) -> None:
         """Load a fresh DB and environment. Call once per attack bundle (not per session)."""
-        fresh_db = self._db_cls.load(self._db_path)
+        if self.domain == "banking_knowledge":
+            # banking_knowledge's TransactionalDB.load expects a string path.
+            fresh_db = self._db_cls.load(str(self._db_path))
+        else:
+            fresh_db = self._db_cls.load(self._db_path)
         self._env = self._build_env(db=fresh_db)
 
     def _ensure(self) -> Environment:

@@ -38,8 +38,8 @@ class HumanAttacker(AttackerAgent):
     def __init__(self, *, prompt_prefix: str = "you> "):
         self.prompt_prefix = prompt_prefix
 
-    def get_session_count(self, seed: TaskSeed, is_baseline: bool = False) -> int:
-        return 1 if is_baseline else seed.num_sessions()
+    def get_session_count(self, seed: TaskSeed) -> int:
+        return seed.num_sessions()
 
     def _read(self) -> str | None:
         """Return next stdin line, or ``None`` for any session-ending signal."""
@@ -56,17 +56,10 @@ class HumanAttacker(AttackerAgent):
         return text
 
     @staticmethod
-    def _print_session_header(
-        seed: TaskSeed,
-        context: SessionContext,
-        is_baseline: bool,
-    ) -> None:
+    def _print_session_header(seed: TaskSeed, context: SessionContext) -> None:
         """Print scenario context so the human knows which phase they're in."""
-        if is_baseline:
-            marker = f"BASELINE (single session, all phases as one blob)"
-        else:
-            n = seed.num_sessions()
-            marker = f"SESSION {context.session_index + 1}/{n}"
+        n = seed.num_sessions()
+        marker = f"SESSION {context.session_index + 1}/{n}"
         print()
         print("=" * 72)
         print(f" {marker}  seed={seed.seed_id}  policy={seed.policy_area}")
@@ -77,18 +70,12 @@ class HumanAttacker(AttackerAgent):
             print(f"  hidden_goal:    {seed.hidden_attacker_goal}")
 
         intents = seed.session_intents or []
-        if is_baseline:
-            for i, inner in enumerate(intents):
-                body = "\n".join(inner).strip() if inner else "(continue)"
-                print(f"  Phase {i + 1}: {body}")
-        elif 0 <= context.session_index < len(intents):
+        if 0 <= context.session_index < len(intents):
             bucket = intents[context.session_index]
             if bucket:
                 body = "\n".join(bucket).strip()
                 print(f"  scenario hint: {body}")
-        print(
-            "  (empty line / :q / ###STOP### / Ctrl-D ends this session)"
-        )
+        print("  (empty line / :q / ###STOP### / Ctrl-D ends this session)")
         print("-" * 72)
 
     @staticmethod
@@ -106,8 +93,8 @@ class HumanAttacker(AttackerAgent):
             preview = content if len(content) <= 800 else content[:800] + "... [truncated]"
             print(f"\n[tool result] {preview}\n")
 
-    def start_session(self, context: SessionContext, is_baseline: bool = False) -> str:
-        self._print_session_header(context.seed, context, is_baseline)
+    def start_session(self, context: SessionContext) -> str:
+        self._print_session_header(context.seed, context)
         msg = self._read()
         # The orchestrator requires a non-empty opening message; if the human
         # immediately ends the session, default to a generic opener so the
@@ -118,7 +105,6 @@ class HumanAttacker(AttackerAgent):
         self,
         context: SessionContext,
         dialogue_without_system: list[dict[str, Any]],
-        is_baseline: bool = False,
     ) -> str | None:
         self._print_recent_agent_turn(dialogue_without_system)
         return self._read()

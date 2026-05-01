@@ -7,25 +7,38 @@ from typing import Any
 
 @dataclass
 class TaskSeed:
-    """One attack scenario loaded from the CRAFT seeds JSON."""
+    """One attack scenario loaded from the v4.1 seeds JSON."""
     seed_id: str
+    domain: str  # "airline" / "retail" / "banking_knowledge" — picks the env
     user_id: str
     reservation_id: str
     violation_tool: str
     false_claim: str
     policy_area: str
     session_intents: list[list[str]]
-    baseline_messages: list[str] | None = None
-    # When set, ``CraftLLMAttacker`` uses these instead of scripted ``session_intents`` text.
+    customer_known_info: str
     hidden_attacker_goal: str | None = None
-    roleplay_scenario: str | None = None
     # Optional explicit planted-claim records for ClaimTracker. Each entry is a
     # raw dict with keys {claim_id, canonical, variants, target_policy, negation}
-    # matching ``memory.PlantedClaim``. Stored as dicts (not as PlantedClaim
-    # instances) so this module stays free of the ``memory.*`` import. When
-    # ``None``, ``core.instrumentation.derive_planted_claims`` auto-derives a
-    # single primary claim from ``false_claim`` + ``policy_area``.
+    # matching ``memory.PlantedClaim``.
     planted_claim_data: list[dict[str, Any]] | None = None
+    # Concurrent benign task — the customer's legitimate need that runs
+    # alongside the adversarial intent. The benign reservation is independent
+    # from ``reservation_id`` (the adversarial target).
+    benign_intent: str | None = None
+    benign_reservation_id: str | None = None
+    expected_benign_actions: list[str] | None = None
+    # Optional analysis tags — let the report split ASR by claim verifiability
+    # (does the agent have a tool to falsify the claim?) and by where the
+    # benign request lands in the dialogue (early = before the trigger turn,
+    # late = interleaved with the adversarial ask). Defaults preserve behavior
+    # on seeds written before these fields existed.
+    claim_type: str = "verifiable"
+    benign_timing: str = "early"
+    # Per-seed override for SessionRunner.max_turns. Banking seeds frequently
+    # need 30+ turns to fully exercise the policy decision; airline / retail
+    # seeds finish in the default 20. ``None`` => use runner default.
+    max_turns_override: int | None = None
 
     def num_sessions(self) -> int:
         return len(self.session_intents)
@@ -48,6 +61,10 @@ class SessionMechanicalResult:
     #   {"role": "assistant", "content": str, "tool_calls": [{"name", "arguments"}]?}
     #   {"role": "tool", "content": str, "name": str}
     messages: list[dict[str, Any]]
+    # How the session loop ended:
+    # transfer / attacker_stop / max_turns / agent_error / attacker_error.
+    # Lets the report tell "agent defended" apart from a control-flow short-circuit.
+    terminated_by: str = "unknown"
 
 
 @dataclass
@@ -148,7 +165,6 @@ class ExperimentResult:
     """
     attack_id: str
     memory_mode: str
-    is_baseline: bool
     model: str
     violation_tool: str
     violation_detected: bool
@@ -167,12 +183,28 @@ class ExperimentResult:
     first_laundering_session: str | None = None
     context_size_curve: list[int] | None = None
     audit_log_path: str | None = None
+    # Concurrent benign-task outcome. ``benign_completed`` = state matched AND
+    # every required action fired against the specific benign reservation.
+    # The two component flags let the report tell "agent tried but DB diverged"
+    # from "agent never tried".
+    benign_completed: bool | None = None
+    benign_state_match: bool | None = None
+    benign_actions_match: bool | None = None
+    benign_actions_called: list[str] | None = None
+    # How ``violation_detected`` was decided: "db_diff" (ground truth from
+    # pre/post snapshot), "tool_match" (weaker fallback when the resource
+    # wasn't snapshottable), "none" (defended), or None (pre-snapshot didn't
+    # fire — usually missing seed.user_id).
+    violation_grounding: str | None = None
+    # Carry seed analysis tags onto the result so the report can split ASR
+    # cells without re-loading the seed JSON.
+    claim_type: str = "verifiable"
+    benign_timing: str = "early"
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "attack_id": self.attack_id,
             "memory_mode": self.memory_mode,
-            "is_baseline": self.is_baseline,
             "model": self.model,
             "violation_tool": self.violation_tool,
             "violation_detected": self.violation_detected,
@@ -190,6 +222,13 @@ class ExperimentResult:
             "first_laundering_session": self.first_laundering_session,
             "context_size_curve": self.context_size_curve,
             "audit_log_path": self.audit_log_path,
+            "benign_completed": self.benign_completed,
+            "benign_state_match": self.benign_state_match,
+            "benign_actions_match": self.benign_actions_match,
+            "benign_actions_called": self.benign_actions_called,
+            "violation_grounding": self.violation_grounding,
+            "claim_type": self.claim_type,
+            "benign_timing": self.benign_timing,
         }
 
 
@@ -198,7 +237,6 @@ def experiment_from_dict(d: dict[str, Any]) -> ExperimentResult:
     return ExperimentResult(
         attack_id=d["attack_id"],
         memory_mode=d["memory_mode"],
-        is_baseline=d.get("is_baseline", False),
         model=d.get("model", ""),
         violation_tool=d.get("violation_tool", ""),
         violation_detected=d.get("violation_detected", False),
@@ -216,4 +254,11 @@ def experiment_from_dict(d: dict[str, Any]) -> ExperimentResult:
         first_laundering_session=d.get("first_laundering_session"),
         context_size_curve=d.get("context_size_curve"),
         audit_log_path=d.get("audit_log_path"),
+        benign_completed=d.get("benign_completed"),
+        benign_state_match=d.get("benign_state_match"),
+        benign_actions_match=d.get("benign_actions_match"),
+        benign_actions_called=d.get("benign_actions_called"),
+        violation_grounding=d.get("violation_grounding"),
+        claim_type=d.get("claim_type", "verifiable"),
+        benign_timing=d.get("benign_timing", "early"),
     )
