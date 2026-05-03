@@ -65,10 +65,8 @@ from tasks.loader import (
 MODEL = "openrouter/google/gemini-2.5-flash"
 ATTACKER_MODEL = "openrouter/openai/gpt-4.1-mini"
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
-CRAFT_SEEDS_DEFAULT = Path(__file__).resolve().parent.parent / "tasks" / "multisessionbench_v4_1_with_attack_session_intents.json"
-
-_DEFAULT_MEMORY_MODES = ("no_memory", "full_context", "summary_rolling")
-
+CRAFT_SEEDS_DEFAULT = Path(__file__).resolve().parent.parent / "tasks" / "multisessionbench_v5_full.json"
+_DEFAULT_MEMORY_MODES = ("no_memory", "full_context", "summary_rolling", "summary_cumulative", "hybrid_recent_summary", "full_context_recent2")
 # Every non-RAG configuration the structured-turn factory exposes.
 _NON_RAG_MEMORY_MODES = (
     "no_memory",              # NoMemoryProvider

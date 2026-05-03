@@ -210,7 +210,6 @@ def enrich_experiment_result(
     return ExperimentResult(
         attack_id=exp.attack_id,
         memory_mode=exp.memory_mode,
-        is_baseline=exp.is_baseline,
         model=exp.model,
         violation_tool=exp.violation_tool,
         violation_detected=violated,
