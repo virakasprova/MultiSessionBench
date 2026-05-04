@@ -169,7 +169,10 @@ class ExperimentResult:
     violation_tool: str
     violation_detected: bool
     any_contradiction: bool | None
-    persistence_curve: list[bool] | None
+    # ``None`` entries represent sessions whose judge was skipped/errored —
+    # they preserve session-index alignment so persistence_curve[i] always
+    # matches session_results[i].
+    persistence_curve: list[bool | None] | None
     compliance_score: float | None
     total_cost: float
     policy_area: str

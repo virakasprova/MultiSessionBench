@@ -226,7 +226,7 @@ def _find_claim_in_text(
     Returns (found: bool, matched_fragment: str).
     Searches for any form of the claim in memory_text using token overlap.
     """
-    sentences = re.split(r"[.!\n]+", memory_text)
+    sentences = re.split(r"[.!?\n]+", memory_text)
     best_score, best_frag = 0.0, ""
     for form in claim.all_forms():
         for sent in sentences:
@@ -315,16 +315,27 @@ class ClaimTracker:
     # ── Core logic ────────────────────────────────────────────────────────────
 
     def _tag_turns(self, turns: list[Turn], session_id: str) -> None:
-        """Mark turns that contain any form of a planted claim."""
+        """Mark turns that contain any form of a planted claim.
+
+        When a turn matches multiple claims, the highest-overlap claim wins
+        (deterministic across runs); the inner ``break`` only exits the
+        ``forms`` loop, so we score every claim and pick the best.
+        """
         for turn in turns:
             if turn.role != "user":
                 continue
+            best_score = 0.0
+            best_claim_id: Optional[str] = None
             for claim in self.claims.values():
                 for form in claim.all_forms():
-                    if _overlap(form, turn.content) >= self.overlap_threshold:
-                        turn.is_planted_claim = True
-                        turn.claim_id = claim.claim_id
+                    score = _overlap(form, turn.content)
+                    if score >= self.overlap_threshold and score > best_score:
+                        best_score = score
+                        best_claim_id = claim.claim_id
                         break
+            if best_claim_id is not None:
+                turn.is_planted_claim = True
+                turn.claim_id = best_claim_id
 
     def _classify(
         self,

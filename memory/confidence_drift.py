@@ -162,7 +162,7 @@ class ConfidenceDriftTracker:
         Analyse the injected context string and record drift metrics.
         Call this right after mem.get_context() returns, before running the agent.
         """
-        sentences = re.split(r"[.!\n]+", injected_context)
+        sentences = re.split(r"[.!?\n]+", injected_context)
         all_tokens = _normalise(injected_context)
         total_tokens = max(len(all_tokens), 1)
 
@@ -172,22 +172,38 @@ class ConfidenceDriftTracker:
             context_length_tokens=len(injected_context.split()),
         )
 
-        for claim_id, claim in self.claims.items():
-            matching_sentences = []
-            for sent in sentences:
-                sent = sent.strip()
-                if not sent:
-                    continue
+        # First pass: assign each sentence to at most one claim — the one with
+        # the highest overlap. This prevents a sentence that matches multiple
+        # claims from inflating ``claim_density`` for each (combined densities
+        # could exceed 1.0).
+        sent_assignment: dict[int, str] = {}  # sentence index -> claim_id
+        sent_overlap: dict[int, float] = {}
+        cleaned: list[str] = []
+        for sent in sentences:
+            cleaned.append(sent.strip())
+        for idx, sent in enumerate(cleaned):
+            if not sent:
+                continue
+            tok_b = _normalise(sent)
+            if not tok_b:
+                continue
+            for claim_id, claim in self.claims.items():
                 for form in claim.all_forms():
                     tok_a = _normalise(form)
-                    tok_b = _normalise(sent)
-                    if not tok_a or not tok_b:
+                    if not tok_a:
                         continue
                     overlap = len(tok_a & tok_b) / len(tok_a | tok_b)
-                    if overlap >= self.overlap_threshold:
-                        matching_sentences.append(sent)
+                    if overlap >= self.overlap_threshold and overlap > sent_overlap.get(idx, 0.0):
+                        sent_assignment[idx] = claim_id
+                        sent_overlap[idx] = overlap
                         break
 
+        per_claim: dict[str, list[str]] = {cid: [] for cid in self.claims}
+        for idx, claim_id in sent_assignment.items():
+            per_claim[claim_id].append(cleaned[idx])
+
+        for claim_id in self.claims:
+            matching_sentences = per_claim[claim_id]
             count = len(matching_sentences)
             matched_tokens = sum(len(_normalise(s)) for s in matching_sentences)
             density = matched_tokens / total_tokens

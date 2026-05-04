@@ -65,10 +65,15 @@ class RollingSummaryProvider(BaseMemoryProvider):
     each session, enabling post-hoc analysis of which claims survived/distorted.
     """
 
-    def __init__(self, summariser=None, use_attribution=False):
+    def __init__(self, summariser=None, use_attribution=False, user_scoped=True):
         super().__init__(use_attribution=use_attribution)
         self._summariser: Callable[[str], str] = summariser or _extractive_summariser
         self._summary_log: list[SummaryLogEntry] = []
+        # When True (default), ``get_context(user_id=X)`` only returns
+        # summaries added for user ``X``. ``CrossUserMemoryStore`` builds a
+        # second instance with ``user_scoped=False`` for the explicit shared
+        # pool used in "shared" / "shared_summary" modes.
+        self.user_scoped = user_scoped
 
     def add_session(self, turns, session_id=None,
                     user_type="unknown", user_id="default"):
@@ -91,7 +96,16 @@ class RollingSummaryProvider(BaseMemoryProvider):
         return session_id
 
     def get_context(self, query="", exclude_session_id=None, user_id="default"):
-        items = [e for e in self._summary_log if e.session_id != exclude_session_id]
+        # Default is per-user isolation: only this user's summaries are
+        # returned. Cross-user mixing is the explicit job of
+        # ``CrossUserMemoryStore`` ("shared_summary" mode), which talks to a
+        # second RollingSummaryProvider it owns; a direct caller asking for
+        # ``user_id="X"`` should not see other users' content.
+        items = [
+            e for e in self._summary_log
+            if e.session_id != exclude_session_id
+            and (not self.user_scoped or e.user_id == user_id)
+        ]
         if not items:
             return ""
         lines = ["Summaries of prior sessions:"]
@@ -141,11 +155,20 @@ class CumulativeSummaryProvider(BaseMemoryProvider):
     Most vulnerable to gradual belief injection / laundering.
     """
 
-    def __init__(self, summariser=None, use_attribution=False):
+    def __init__(self, summariser=None, use_attribution=False, user_scoped=True):
         super().__init__(use_attribution=use_attribution)
         self._summariser: Callable[[str, str], str] = summariser or _default_cumulative
-        self._running_summary: str = ""
+        # Per-user running summary. ``user_scoped=False`` collapses everything
+        # under a single ``_GLOBAL_KEY`` for the shared-pool case used by
+        # ``CrossUserMemoryStore``.
+        self.user_scoped = user_scoped
+        self._running_summaries: dict[str, str] = {}
         self._summary_history: list[dict] = []   # full evolution log for paper
+
+    _GLOBAL_KEY = "__global__"
+
+    def _key(self, user_id: str) -> str:
+        return user_id if self.user_scoped else self._GLOBAL_KEY
 
     def add_session(self, turns, session_id=None,
                     user_type="unknown", user_id="default"):
@@ -155,28 +178,37 @@ class CumulativeSummaryProvider(BaseMemoryProvider):
         session = Session(session_id, turns, user_type, user_id)
         self._sessions.append(session)
 
+        key = self._key(user_id)
         new_text = session.as_text(include_roles=True)
-        prev_summary = self._running_summary
-        self._running_summary = self._summariser(self._running_summary, new_text)
+        prev_summary = self._running_summaries.get(key, "")
+        new_summary = self._summariser(prev_summary, new_text)
+        self._running_summaries[key] = new_summary
 
         self._summary_history.append({
             "session_id": session_id,
+            "user_id": user_id,
             "user_type": user_type,
             "prev_summary": prev_summary,
-            "new_summary": self._running_summary,
+            "new_summary": new_summary,
         })
         return session_id
 
     def get_context(self, query="", exclude_session_id=None, user_id="default"):
-        if not self._running_summary:
+        running = self._running_summaries.get(self._key(user_id), "")
+        if not running:
             return ""
-        return f"Running summary of all prior sessions:\n  {self._running_summary}"
+        return f"Running summary of all prior sessions:\n  {running}"
 
     def snapshot(self) -> str:
-        return self._running_summary
+        # Aggregated view across users — used by claim_tracker / audit_log
+        # to inspect the full state of the provider. For ``user_scoped=False``
+        # this is just the single global summary.
+        if not self._running_summaries:
+            return ""
+        return "\n".join(self._running_summaries.values())
 
-    def get_running_summary(self) -> str:
-        return self._running_summary
+    def get_running_summary(self, user_id: str = "default") -> str:
+        return self._running_summaries.get(self._key(user_id), "")
 
     def get_summary_history(self) -> list[dict]:
         """Full evolution of the summary — each update recorded for paper analysis."""
@@ -185,17 +217,18 @@ class CumulativeSummaryProvider(BaseMemoryProvider):
     def get_memory_contents(self):
         base = []
         for s in self._sessions:
+            running = self._running_summaries.get(self._key(s.user_id), "")
             for t in s.turns:
                 base.append({
                     "session_id": s.session_id, "user_type": s.user_type,
                     "user_id": s.user_id, "role": t.role,
                     "turn_index": t.turn_index, "content": t.content,
                     "is_planted_claim": t.is_planted_claim, "claim_id": t.claim_id,
-                    "running_summary": self._running_summary,
+                    "running_summary": running,
                 })
         return base
 
     def clear(self):
         super().clear()
-        self._running_summary = ""
+        self._running_summaries.clear()
         self._summary_history.clear()

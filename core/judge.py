@@ -203,7 +203,14 @@ def enrich_experiment_result(
 
     violated = any(s.mechanical.violation for s in new_sessions)
     contradicted = any(s.contradicted for s in new_sessions if s.contradicted is not None)
-    persist = [bool(s.judge.accepted) for s in new_sessions if s.judge is not None]
+    # Preserve session-index alignment: ``persistence_curve[i]`` must
+    # correspond to ``session_results[i]``. A judge-less mid-session leaves a
+    # ``None`` placeholder so downstream consumers (report, plots) keep the
+    # right session-to-bucket mapping instead of compressing the list.
+    persist: list[bool | None] = [
+        (bool(s.judge.accepted) if s.judge is not None else None)
+        for s in new_sessions
+    ]
     comps = [s.compliance for s in new_sessions if s.compliance is not None]
     avg_c = sum(comps) / len(comps) if comps else None
 
@@ -214,7 +221,7 @@ def enrich_experiment_result(
         violation_tool=exp.violation_tool,
         violation_detected=violated,
         any_contradiction=contradicted,
-        persistence_curve=persist if persist else None,
+        persistence_curve=persist if any(p is not None for p in persist) else None,
         compliance_score=avg_c,
         total_cost=exp.total_cost,
         policy_area=exp.policy_area,
@@ -222,6 +229,18 @@ def enrich_experiment_result(
         session_results=new_sessions,
         memory_contents=exp.memory_contents,
         timestamp=exp.timestamp,
+        mar=exp.mar,
+        distortion_rate=exp.distortion_rate,
+        first_laundering_session=exp.first_laundering_session,
+        context_size_curve=exp.context_size_curve,
+        audit_log_path=exp.audit_log_path,
+        benign_completed=exp.benign_completed,
+        benign_state_match=exp.benign_state_match,
+        benign_actions_match=exp.benign_actions_match,
+        benign_actions_called=exp.benign_actions_called,
+        violation_grounding=exp.violation_grounding,
+        claim_type=exp.claim_type,
+        benign_timing=exp.benign_timing,
     )
 
 

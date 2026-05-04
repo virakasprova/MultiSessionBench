@@ -111,7 +111,21 @@ class MemoryAuditLog:
         """
         Call this BEFORE running the agent for a session.
         Records what context was injected and how large it is.
+
+        If a record already exists for ``session_id`` (caller invoked us
+        twice for the same session), the existing pre-session fields are
+        overwritten in place rather than appending a duplicate. This avoids
+        leaving the earlier record with an empty ``memory_snapshot`` after
+        ``record_post_session`` (which only touches the most recent matching
+        record) and it keeps ``_session_index`` monotonic.
         """
+        existing = self._find(session_id)
+        if existing is not None:
+            existing.timestamp = time.time()
+            existing.injected_context = injected_context
+            existing.query = query
+            existing.context_token_estimate = len(injected_context.split())
+            return
         record = SessionBoundaryRecord(
             session_id=session_id,
             session_index=self._session_index,
@@ -126,11 +140,17 @@ class MemoryAuditLog:
         """
         Call this AFTER add_session() has been called on the provider.
         Records the memory snapshot and claim statuses.
+
+        Idempotent on the ``_session_index`` counter: a second call for the
+        same ``session_id`` refreshes the snapshot and claim statuses but
+        does not advance ``_session_index`` (which would desync future
+        records).
         """
         record = self._find(session_id)
         if record is None:
             return
 
+        already_finalised = bool(record.memory_snapshot) or bool(record.claim_statuses)
         record.memory_snapshot = self.provider.snapshot()
 
         if self.tracker is not None:
@@ -141,7 +161,8 @@ class MemoryAuditLog:
                 if r.session_id == session_id
             }
 
-        self._session_index += 1
+        if not already_finalised:
+            self._session_index += 1
 
     # ── Querying ──────────────────────────────────────────────────────────────
 
@@ -195,6 +216,14 @@ class MemoryAuditLog:
                 preview = r.injected_context[:200].replace("\n", " ")
                 lines.append(f"  Context preview: {preview}...")
         return "\n".join(lines)
+
+    def records(self) -> list[SessionBoundaryRecord]:
+        """Return a shallow copy of the recorded session-boundary records.
+
+        Public accessor so callers (orchestrator audit JSON, downstream
+        analysis) don't need to reach into ``_records``.
+        """
+        return list(self._records)
 
     def save(self, path: str) -> None:
         data = [

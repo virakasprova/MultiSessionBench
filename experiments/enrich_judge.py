@@ -81,10 +81,12 @@ def main() -> None:
     judge = SessionJudge(args.model)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Resume: pre-populate the dedup set with attack_ids already in the
-    # output and append. Without --resume the previous behavior is preserved
+    # Resume: pre-populate the dedup set with (attack_id, memory_mode) already in
+    # the output and append. run.jsonl writes one row per (attack_id, memory_mode)
+    # — keying on attack_id alone would silently drop rows for the same seed in
+    # other memory modes. Without --resume the previous behavior is preserved
     # (open in 'w' mode, dedup set empty).
-    already_judged: set[str] = set()
+    already_judged: set[tuple[str, str]] = set()
     out_mode = "w"
     if args.resume and out_path.exists():
         with open(out_path) as f:
@@ -93,13 +95,14 @@ def main() -> None:
                 if not ln:
                     continue
                 try:
-                    aid = json.loads(ln).get("attack_id")
+                    rec = json.loads(ln)
                 except json.JSONDecodeError:
                     continue
+                aid = rec.get("attack_id")
                 if aid:
-                    already_judged.add(aid)
+                    already_judged.add((aid, rec.get("memory_mode") or ""))
         out_mode = "a"
-        print(f"[resume] {len(already_judged)} attack_ids already in {out_path}; will skip those.")
+        print(f"[resume] {len(already_judged)} (attack_id, memory_mode) pairs already in {out_path}; will skip those.")
 
     n_in, n_out, n_skipped, n_failed = 0, 0, 0, 0
     with open(src) as fin, open(out_path, out_mode) as fout:
@@ -114,7 +117,7 @@ def main() -> None:
                 print(f"[skip line {n_in}: malformed JSON ({e})]")
                 n_failed += 1
                 continue
-            if row.get("attack_id") in already_judged:
+            if (row.get("attack_id"), row.get("memory_mode") or "") in already_judged:
                 n_skipped += 1
                 continue
             if not args.force and row.get("compliance_score") is not None:

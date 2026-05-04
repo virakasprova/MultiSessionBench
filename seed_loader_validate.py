@@ -75,12 +75,24 @@ def validate_airline(seed: dict, base_url: str) -> list[str]:
 
     user_reservations = [r["reservation_id"] for r in user.get("reservations", [])]
 
-    # 2. adversarial reservation
-    adv_res_match = re.search(r"\b([A-Z0-9]{6})\b", adv_instr.get("reason_for_call", ""))
-    if adv_res_match:
-        adv_res = adv_res_match.group(1)
-        if adv_res not in user_reservations:
-            errors.append(f"Adversarial reservation {adv_res} not in user {user_id} reservations: {user_reservations}")
+    # 2. adversarial reservation. The free-text ``reason_for_call`` may
+    # mention several 6-char uppercase tokens (``GOLD24``, ``REFUND``,
+    # ``FLIGHT``, etc.) before the real reservation id, so picking the
+    # *first* regex hit produces false negatives. Prefer any token that is
+    # actually one of the user's reservations; only fall back to the first
+    # 6-char token (and report it as missing) when no candidate matches —
+    # which keeps the historical "no reservation in text" diagnostic.
+    reason = adv_instr.get("reason_for_call", "")
+    candidates = re.findall(r"\b([A-Z0-9]{6})\b", reason)
+    matched = next((c for c in candidates if c in user_reservations), None)
+    if matched is not None:
+        # Real reservation present — nothing to flag.
+        pass
+    elif candidates:
+        errors.append(
+            f"No candidate token in reason_for_call ({candidates}) "
+            f"matches user {user_id} reservations: {user_reservations}"
+        )
     else:
         errors.append("Could not extract adversarial reservation ID from reason_for_call")
 

@@ -122,6 +122,12 @@ class RAGMemoryProvider(BaseMemoryProvider):
         self.similarity_threshold = similarity_threshold
         self.user_scoped = user_scoped
         self._chunks: list[MemoryChunk] = []
+        # Dimensionality of the first embedding seen. Subsequent additions /
+        # queries must match — mixing 384-d SentenceTransformer with 1536-d
+        # OpenAI embeddings produces silently-meaningless cosine scores or a
+        # raw ``np.stack`` ValueError at retrieval time. We surface a clear
+        # error instead.
+        self._embedding_dim: Optional[int] = None
 
     def add_session(self, turns, session_id=None,
                     user_type="unknown", user_id="default"):
@@ -141,10 +147,23 @@ class RAGMemoryProvider(BaseMemoryProvider):
         new_chunks = [c for c in new_chunks if c.text and c.text.strip()]
         if new_chunks:
             embeddings = self.backend.encode([c.text for c in new_chunks])
+            self._check_dim(embeddings.shape[1] if embeddings.ndim == 2 else len(embeddings[0]))
             for chunk, emb in zip(new_chunks, embeddings):
                 chunk.embedding = emb
         self._chunks.extend(new_chunks)
         return session_id
+
+    def _check_dim(self, dim: int) -> None:
+        if self._embedding_dim is None:
+            self._embedding_dim = dim
+        elif dim != self._embedding_dim:
+            raise ValueError(
+                f"RAGMemoryProvider: embedding dim mismatch — got {dim}, "
+                f"already storing {self._embedding_dim}-d vectors. The provider "
+                f"assumes a single embedding backend for its lifetime; swapping "
+                f"backends (e.g. SentenceTransformer 384-d ↔ OpenAI 1536-d) "
+                f"requires clear() between sessions or a fresh instance."
+            )
 
     def _chunk_by_turn(self, turns, session_id, user_type, user_id):
         return [
@@ -180,6 +199,7 @@ class RAGMemoryProvider(BaseMemoryProvider):
         if not candidates:
             return []
         query_emb = self.backend.encode([query])[0]
+        self._check_dim(len(query_emb))
         scores = np.stack([c.embedding for c in candidates]) @ query_emb
         results = []
         for idx in np.argsort(scores)[::-1]:
@@ -216,3 +236,4 @@ class RAGMemoryProvider(BaseMemoryProvider):
     def clear(self):
         super().clear()
         self._chunks.clear()
+        self._embedding_dim = None

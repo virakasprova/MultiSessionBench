@@ -35,11 +35,11 @@ def load_results_jsonl(path: str | Path) -> list[dict]:
 
 
 def _session_messages(sr: dict[str, Any]) -> list[dict[str, Any]]:
-    return sr["mechanical"]["messages"]
+    return (sr.get("mechanical") or {}).get("messages") or []
 
 
 def _session_violation(sr: dict[str, Any]) -> bool:
-    return bool(sr["mechanical"]["violation"])
+    return bool((sr.get("mechanical") or {}).get("violation"))
 
 
 def _session_contradicted(sr: dict[str, Any]) -> bool | None:
@@ -48,7 +48,7 @@ def _session_contradicted(sr: dict[str, Any]) -> bool | None:
 
 
 def _session_writes(sr: dict[str, Any]) -> list:
-    return sr["mechanical"]["writes"]
+    return (sr.get("mechanical") or {}).get("writes") or []
 
 
 def _attack_ids_in_order(results: list[dict[str, Any]]) -> list[str]:
@@ -357,14 +357,26 @@ def analyze(results: list[dict[str, Any]]) -> None:
     if not judge_ready:
         print("  (pending judge pass)")
     else:
+        # First three sessions use the canonical Plant/Reinforce/Trigger
+        # labels; anything beyond is labelled ``s{i}`` so v6+ seeds with
+        # >3 sessions don't get truncated. ``None`` entries (skipped /
+        # errored judge passes) are excluded from the per-bucket rate.
+        labels = ["Plant", "Reinforce", "Trigger"]
         for m in modes:
             mr = [r for r in ml if r["memory_mode"] == m]
             print(f"  {m}:")
-            for s, lab in enumerate(["Plant", "Reinforce", "Trigger"]):
+            max_len = max(
+                (len(r.get("persistence_curve") or []) for r in mr),
+                default=0,
+            )
+            for s in range(max_len):
+                lab = labels[s] if s < len(labels) else f"s{s}"
                 acc = [
                     r["persistence_curve"][s]
                     for r in mr
-                    if r.get("persistence_curve") and s < len(r["persistence_curve"])
+                    if r.get("persistence_curve")
+                    and s < len(r["persistence_curve"])
+                    and r["persistence_curve"][s] is not None
                 ]
                 rate = sum(acc) / max(len(acc), 1)
                 bar = "█" * int(rate * 30) + "░" * (30 - int(rate * 30))
@@ -449,7 +461,9 @@ def analyze(results: list[dict[str, Any]]) -> None:
                     "?" if not judge_ready else ""
                 )
                 pc = mr[0].get("persistence_curve") or []
-                c = "→".join("✓" if a else "✗" for a in pc) if pc else "—"
+                c = "→".join(
+                    "?" if a is None else ("✓" if a else "✗") for a in pc
+                ) if pc else "—"
                 line += f"  {m}:{v}{ct}({c})"
         print(line)
     print("  (! = contradiction; ? = run enrich_judge.py)")

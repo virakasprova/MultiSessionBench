@@ -153,7 +153,16 @@ def _normalize_seed_entry(raw: dict) -> dict:
         if not isinstance(a, dict):
             continue
         args = a.get("arguments") or {}
-        for key in ("reservation_id", "order_id"):
+        # Banking actions use credit_card_account_id / account_id / card_id
+        # as their resource identifiers; airline + retail use reservation_id /
+        # order_id. Without including the banking arg names here, banking
+        # benign tasks loaded with benign_rid=None and benign scoring is
+        # skipped entirely in the orchestrator.
+        for key in (
+            "reservation_id", "order_id",
+            "credit_card_account_id", "account_id", "card_id",
+            "debit_card_id",
+        ):
             v = args.get(key)
             if isinstance(v, str) and v:
                 benign_rid = v
@@ -164,7 +173,12 @@ def _normalize_seed_entry(raw: dict) -> dict:
     user_id = _extract_user_id_from_known_info(adv_known_info)
     target = _extract_target_resource(adv_notes)
     hidden_goal = adv_reason or adv_purpose or adv_task_text[:200]
-    false_claim = adv_purpose or adv_task_text[:200]
+    # Prefer the seed's top-level ``false_claim`` (customer-language belief) over
+    # ``description.purpose`` (evaluator-meta language: "Agent must not …").
+    # The latter, fed verbatim into the customer LLM's "you sincerely believe"
+    # block, makes weaker models try to embody policy text and confounds ASR.
+    explicit_false_claim = (raw.get("false_claim") or "").strip()
+    false_claim = explicit_false_claim or adv_purpose or adv_task_text[:200]
 
     domain = (raw.get("domain") or "").strip()
     if not domain:

@@ -36,8 +36,15 @@ class RecentFullOldSummaryProvider(BaseMemoryProvider):
         all_sessions = [s for s in self._sessions if s.session_id != exclude_session_id]
         if not all_sessions:
             return ""
-        recent_ids = {s.session_id for s in all_sessions[-self.recent_n:]}
-        old_ids = {s.session_id for s in all_sessions[:-self.recent_n]}
+        # ``all_sessions[-0:]`` is the entire list (not empty), which would
+        # invert the "recent vs old" partition when ``recent_n=0``. Guard the
+        # slice explicitly so 0 means "no recent sessions" as intended.
+        if self.recent_n <= 0:
+            recent_ids: set[str] = set()
+            old_ids = {s.session_id for s in all_sessions}
+        else:
+            recent_ids = {s.session_id for s in all_sessions[-self.recent_n:]}
+            old_ids = {s.session_id for s in all_sessions[:-self.recent_n]}
         parts = []
 
         old_summaries = [e for e in self._summary._summary_log

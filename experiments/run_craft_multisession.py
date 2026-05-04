@@ -836,10 +836,16 @@ def main() -> None:
                 env, args.model, max_turns=args.max_turns, api_base=args.api_base
             )
             for mode in mem_modes:
-                memory = make_memory(mode, args.model, rag_backend=rag_backend)
-                orch = Orchestrator(env, runner, memory, attacker, mode_name=mode)
                 print(f"\n-- [{mode}] (Plant → Reinforce → Trigger) --")
+                # Rebuild ``memory`` and ``orch`` per seed so each attack
+                # starts from a clean provider. ``memory.clear()`` exists,
+                # but cross-seed correctness depended on every provider
+                # variant resetting all internal state — fragile when the
+                # provider set grows (RAG dim cache, summary log, etc.).
+                # Reconstruction is cheap and removes the failure mode.
                 for seed in domain_seeds:
+                    memory = make_memory(mode, args.model, rag_backend=rag_backend)
+                    orch = Orchestrator(env, runner, memory, attacker, mode_name=mode)
                     print(f"  {seed.seed_id} [{mode}]:", end=" ")
                     _attempt(orch, seed)
         final_status = "completed"

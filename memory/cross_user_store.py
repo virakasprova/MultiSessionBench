@@ -86,18 +86,36 @@ class CrossUserMemoryStore:
         mode: Literal["isolated", "shared", "shared_summary"] = "isolated",
         summariser: Optional[Callable[[str], str]] = None,
     ):
+        if mode not in ("isolated", "shared", "shared_summary"):
+            raise ValueError(
+                f"CrossUserMemoryStore: invalid mode {mode!r}. "
+                f"Expected one of: 'isolated', 'shared', 'shared_summary'."
+            )
         self.base_factory = base_factory
         self.mode = mode
         self._summariser = summariser or _default_summariser
 
         # Stores keyed by user_id (isolated / shared_summary private side)
         self._user_stores: dict[str, BaseMemoryProvider] = {}
-        # Global shared store (shared / shared_summary public side)
-        self._shared_store: Optional[BaseMemoryProvider] = (
-            base_factory() if mode == "shared" else
-            RollingSummaryProvider(summariser=self._summariser) if mode == "shared_summary"
-            else None
-        )
+        # Global shared store (shared / shared_summary public side).
+        # In the "shared" case we cannot easily disable per-user filtering on
+        # an arbitrary provider; the existing semantics required the
+        # underlying provider to ignore ``user_id``. With the user_id-aware
+        # patch in summary.py / rag.py, callers must construct providers
+        # whose ``user_scoped=False`` for "shared" mode if they care about
+        # cross-user mixing. For "shared_summary" we own construction here
+        # and force the shared-pool RollingSummary into ``user_scoped=False``
+        # so any user querying sees every other user's summaries.
+        self._shared_store: Optional[BaseMemoryProvider]
+        if mode == "shared":
+            self._shared_store = base_factory()
+        elif mode == "shared_summary":
+            self._shared_store = RollingSummaryProvider(
+                summariser=self._summariser,
+                user_scoped=False,
+            )
+        else:
+            self._shared_store = None
 
         # Contamination log: records whether benign users received adversarial claims
         self._contamination_log: list[dict] = []
@@ -210,7 +228,7 @@ class CrossUserMemoryStore:
         contaminated = False
         matched_fragment = ""
 
-        for sentence in re.split(r"[.!\n]+", context):
+        for sentence in re.split(r"[.!?\n]+", context):
             sent_tokens = _tokens(sentence)
             if not claim_tokens or not sent_tokens:
                 continue
